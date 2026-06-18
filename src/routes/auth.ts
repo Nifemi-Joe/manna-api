@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { getUserByEmail, createMagicToken, verifyMagicToken, createSession, deleteSession, formatUser, getUserById, SESSION_COOKIE } from '../services/auth.js';
 import { sendMagicLink } from '../services/email.js';
-import { dbRun } from '../db';
+import { dbRun } from '../db/index.js';
 
 const COOKIE_OPTS = {
     httpOnly: true,

@@ -4,8 +4,8 @@
  */
 
 import 'dotenv/config';
-import { initDb, dbGet, dbRun, dbAll, persistDb, dbExec } from './index';
-import { runMigrations } from './migrate';
+import { initDb, dbGet, dbRun, dbAll, persistDb, dbExec } from './index.js';
+import { runMigrations } from './migrate.js';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
 

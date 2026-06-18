@@ -11,7 +11,7 @@
  */
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { dbAll, dbGet, dbRun } from '../db';
+import { dbAll, dbGet, dbRun } from '../db/index.js';
 import { getUserById } from '../services/auth.js';
 const createRoleSchema = z.object({
     name: z.string().min(1).max(80),

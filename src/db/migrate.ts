@@ -3,7 +3,7 @@
  * Idempotent schema migrations. Run on startup.
  */
 
-import { dbExec, persistDb } from './index';
+import { dbExec, persistDb } from './index.js';
 
 const SCHEMA = `
 -- Companies

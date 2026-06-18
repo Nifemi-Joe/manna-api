@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { dbAll, dbGet, dbRun } from '../db';
+import { dbAll, dbGet, dbRun } from '../db/index.js';
 const placeOrderSchema = z.object({
     mealId: z.string(),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),

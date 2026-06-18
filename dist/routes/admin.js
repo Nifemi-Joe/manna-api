@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { dbAll, dbGet, dbRun } from '../db';
+import { dbAll, dbGet, dbRun } from '../db/index.js';
 const createCompanySchema = z.object({
     name: z.string().min(2),
     plan: z.enum(['pilot', 'starter', 'growth', 'enterprise']).default('pilot'),

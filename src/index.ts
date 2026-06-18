@@ -13,16 +13,16 @@ import rateLimit from '@fastify/rate-limit';
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { initDb } from './db';
-import { runMigrations } from './db/migrate';
-import authPlugin from './plugins/auth';
+import { initDb } from './db/index.js';
+import { runMigrations } from './db/migrate.js';
+import authPlugin from './plugins/auth.js';
 
-import authRoutes from './routes/auth';
-import accessRoutes from './routes/access';
-import employeeRoutes from './routes/employee';
-import hrRoutes from './routes/hr';
-import opsRoutes from './routes/ops';
-import adminRoutes, { healthRoute } from './routes/admin';
+import authRoutes from './routes/auth.js';
+import accessRoutes from './routes/access.js';
+import employeeRoutes from './routes/employee.js';
+import hrRoutes from './routes/hr.js';
+import opsRoutes from './routes/ops.js';
+import adminRoutes, { healthRoute } from './routes/admin.js';
 import studioRoutes from './routes/studio.js';
 
 const PORT = parseInt(process.env.PORT ?? '3001', 10);

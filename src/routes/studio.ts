@@ -23,7 +23,7 @@ import { z } from "zod";
 import { nanoid } from "nanoid";
 import fs from "node:fs";
 import path from "node:path";
-import { dbAll, dbGet, dbRun } from "../db";
+import { dbAll, dbGet, dbRun } from "../db/index.js";
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR ?? "./uploads";
 

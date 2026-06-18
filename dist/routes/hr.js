@@ -12,7 +12,7 @@
  */
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import { dbAll, dbGet, dbRun } from '../db';
+import { dbAll, dbGet, dbRun } from '../db/index.js';
 const addEmployeeSchema = z.object({
     email: z.string().email(),
     name: z.string().min(2),

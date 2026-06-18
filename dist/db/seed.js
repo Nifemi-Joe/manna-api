@@ -3,8 +3,8 @@
  * Seeds development data. Safe to re-run (checks existence first).
  */
 import 'dotenv/config';
-import { initDb, dbGet, dbRun, persistDb } from './index';
-import { runMigrations } from './migrate';
+import { initDb, dbGet, dbRun, persistDb } from './index.js';
+import { runMigrations } from './migrate.js';
 import { nanoid } from 'nanoid';
 function now() { return new Date().toISOString(); }
 function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString(); }

@@ -4,7 +4,7 @@
  */
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
-import { dbGet, dbRun, dbAll } from '../db';
+import { dbGet, dbRun, dbAll } from '../db/index.js';
 const SESSION_COOKIE = 'manna_session';
 const SESSION_TTL_DAYS = 30;
 const MAGIC_EXPIRY_MINS = parseInt(process.env.MAGIC_LINK_EXPIRY_MINUTES ?? '15', 10);

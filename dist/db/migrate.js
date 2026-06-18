@@ -2,7 +2,7 @@
  * src/db/migrate.ts
  * Idempotent schema migrations. Run on startup.
  */
-import { dbExec, persistDb } from './index';
+import { dbExec, persistDb } from './index.js';
 const SCHEMA = `
 -- Companies
 CREATE TABLE IF NOT EXISTS companies (

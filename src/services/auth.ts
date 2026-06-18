@@ -5,7 +5,7 @@
 
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
-import { dbGet, dbRun, dbAll } from '../db';
+import { dbGet, dbRun, dbAll } from '../db/index.js';
 
 const SESSION_COOKIE = 'manna_session';
 const SESSION_TTL_DAYS = 30;
