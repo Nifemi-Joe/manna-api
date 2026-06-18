@@ -24,8 +24,8 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
-    "@types/node": "^22.15.29",
-    "@types/nodemailer": "^6.4.17",
+    "@types/node": "^22.19.21",
+    "@types/nodemailer": "^6.4.24",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
