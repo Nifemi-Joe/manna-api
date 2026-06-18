@@ -95,8 +95,10 @@ async function build() {
 
     // ── Error handler ─────────────────────────────────────────
     app.setErrorHandler((error, req, reply) => {
-        const statusCode = (error as any).statusCode ?? error.statusCode ?? 500;
-        const message = error.message ?? 'Internal server error';
+        const err = error as any;
+
+        const statusCode = err.statusCode ?? 500;
+        const message = err.message ?? 'Internal server error';
 
         if (statusCode >= 500) {
             app.log.error({ err: error, url: req.url }, 'Internal error');

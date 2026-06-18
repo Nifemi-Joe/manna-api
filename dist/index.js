@@ -83,8 +83,9 @@ async function build() {
     await app.register(authPlugin);
     // ── Error handler ─────────────────────────────────────────
     app.setErrorHandler((error, req, reply) => {
-        const statusCode = error.statusCode ?? error.statusCode ?? 500;
-        const message = error.message ?? 'Internal server error';
+        const err = error;
+        const statusCode = err.statusCode ?? 500;
+        const message = err.message ?? 'Internal server error';
         if (statusCode >= 500) {
             app.log.error({ err: error, url: req.url }, 'Internal error');
         }
