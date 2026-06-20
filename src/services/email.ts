@@ -1,7 +1,7 @@
 /**
  * src/services/email.ts
  * Sends transactional email via Resend (https://resend.com).
- * Falls back to console logging in development when no API key is set,
+ * Falls back to console logging in local dev when no API key is set,
  * so local dev never accidentally sends real email.
  */
 
@@ -14,7 +14,7 @@ const isDev = process.env.NODE_ENV !== 'production';
 // at import time in environments (like local dev) that don't set one.
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
-const FROM = process.env.EMAIL_FROM ?? 'Manna Office Meals <admin@mannaworkmeals.com>';
+const FROM = process.env.EMAIL_FROM ?? 'Manna Office Meals <noreply@mannaworkmeals.com>';
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const MAGIC_LINK_EXPIRY_MINUTES = process.env.MAGIC_LINK_EXPIRY_MINUTES ?? '15';
 
@@ -47,22 +47,36 @@ function magicLinkHtml(link: string): string {
 </html>`;
 }
 
+export interface MagicLinkResult {
+    /** The full sign-in URL — always populated, regardless of send outcome. */
+    link: string;
+    /** True if Resend confirmed the email was accepted for delivery. */
+    sent: boolean;
+    /** Populated only when `sent` is false — the reason the send failed. */
+    error?: string;
+}
+
 /**
  * Sends a magic sign-in link to the given email via Resend.
- * Returns the generated link (useful for dev/testing — also returned to
- * the client as `debugLink` outside production, see routes/auth.ts).
+ *
+ * Unlike a typical "send" function, this NEVER throws on a delivery
+ * failure — it always returns the generated link plus a `sent` flag and
+ * optional `error`. This lets the caller (routes/auth.ts) decide whether
+ * to expose the link directly as a fallback when delivery isn't possible
+ * (e.g. an unverified sending domain), instead of the request failing
+ * with a 500 and leaving the user with no way to sign in at all.
  */
-export async function sendMagicLink(email: string, token: string): Promise<string> {
+export async function sendMagicLink(email: string, token: string): Promise<MagicLinkResult> {
     const link = `${APP_URL}/login?token=${encodeURIComponent(token)}`;
 
     if (!resend) {
-        // Dev fallback — no RESEND_API_KEY set, just log it.
+        // No RESEND_API_KEY configured at all — log-only, same as before.
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📧  MAGIC LINK (dev mode — RESEND_API_KEY not set)');
+        console.log('📧  MAGIC LINK (RESEND_API_KEY not set)');
         console.log(`    To: ${email}`);
         console.log(`    Link: ${link}`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-        return link;
+        return { link, sent: false, error: 'RESEND_API_KEY not configured' };
     }
 
     const { data, error } = await resend.emails.send({
@@ -74,16 +88,17 @@ export async function sendMagicLink(email: string, token: string): Promise<strin
     });
 
     if (error) {
-        // Surface Resend's error so the caller's catch/log sees the real reason
-        // (bad API key, unverified domain, rate limit, etc.) instead of a vague failure.
-        throw new Error(`Resend send failed: ${error.name} — ${error.message}`);
+        // Don't throw — surface the failure to the caller instead, so a
+        // misconfigured domain doesn't turn into a hard 500 for the user.
+        console.error(`Resend send failed: ${error.name} — ${error.message}`);
+        return { link, sent: false, error: `${error.name}: ${error.message}` };
     }
 
     if (isDev) {
         console.log(`📧 Magic link email sent via Resend (id: ${data?.id}) to ${email}`);
     }
 
-    return link;
+    return { link, sent: true };
 }
 
 /**
