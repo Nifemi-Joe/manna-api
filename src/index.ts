@@ -30,135 +30,133 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 const isDev = process.env.NODE_ENV !== 'production';
 
 async function build() {
-    const app = Fastify({
-        logger: {
-            level: isDev ? 'info' : 'warn',
-            ...(isDev ? {
-                transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
-            } : {}),
-        },
-        disableRequestLogging: !isDev,
-    });
+  const app = Fastify({
+    logger: {
+      level: isDev ? 'info' : 'warn',
+      ...(isDev ? {
+        transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
+      } : {}),
+    },
+    disableRequestLogging: !isDev,
+  });
 
-    // ── Security ──────────────────────────────────────────────
-    await app.register(helmet, {
-        contentSecurityPolicy: false, // API only — no HTML
-        crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow CDN/browser fetch
-    });
+  // ── Security ──────────────────────────────────────────────
+  await app.register(helmet, {
+    contentSecurityPolicy: false, // API only — no HTML
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow CDN/browser fetch
+  });
 
-    // ── CORS ──────────────────────────────────────────────────
-    await app.register(cors, {
-        origin: [
-            '*',
-            'http://127.0.0.1:3000',
-            ...(process.env.APP_URL ? [process.env.APP_URL] : []),
-        ],
-        credentials: true,
-        methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT', 'OPTIONS'],
-    });
+  // ── CORS ──────────────────────────────────────────────────
+  await app.register(cors, {
+    origin: [
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      ...(process.env.APP_URL ? [process.env.APP_URL] : []),
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT', 'OPTIONS'],
+  });
 
-    // ── Rate limiting ─────────────────────────────────────────
-    await app.register(rateLimit, {
-        max: 200,
-        timeWindow: '1 minute',
-        errorResponseBuilder: () => ({ statusCode: 429, message: 'Too many requests' }),
-    });
+  // ── Rate limiting ─────────────────────────────────────────
+  await app.register(rateLimit, {
+    max: 200,
+    timeWindow: '1 minute',
+    errorResponseBuilder: () => ({ statusCode: 429, message: 'Too many requests' }),
+  });
 
-    // ── Cookies ───────────────────────────────────────────────
-    await app.register(cookie, {
-        secret: process.env.SESSION_SECRET ?? 'dev-secret-change-in-production-32c',
-        parseOptions: { httpOnly: true, sameSite: 'lax' },
-    });
+  // ── Cookies ───────────────────────────────────────────────
+  await app.register(cookie, {
+    secret: process.env.SESSION_SECRET ?? 'dev-secret-change-in-production-32c',
+    parseOptions: { httpOnly: true, sameSite: 'lax' },
+  });
 
-    // ── Multipart (file uploads) ──────────────────────────────
-    await app.register(multipart, {
-        limits: {
-            fileSize: parseInt(process.env.MAX_UPLOAD_MB ?? '10', 10) * 1024 * 1024,
-        },
-    });
+  // ── Multipart (file uploads) ──────────────────────────────
+  await app.register(multipart, {
+    limits: {
+      fileSize: parseInt(process.env.MAX_UPLOAD_MB ?? '10', 10) * 1024 * 1024,
+    },
+  });
 
-    // ── Static uploads ────────────────────────────────────────
-    const uploadsDir = process.env.UPLOADS_DIR ?? './uploads';
-    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+  // ── Static uploads ────────────────────────────────────────
+  const uploadsDir = process.env.UPLOADS_DIR ?? './uploads';
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
-    // Serve uploaded files
-    app.get('/uploads/:filename', async (req, reply) => {
-        const { filename } = req.params as { filename: string };
-        const filepath = path.join(uploadsDir, path.basename(filename)); // prevent traversal
-        if (!fs.existsSync(filepath)) return reply.status(404).send({ message: 'File not found' });
-        const stream = fs.createReadStream(filepath);
-        return reply.send(stream);
-    });
+  // Serve uploaded files
+  app.get('/uploads/:filename', async (req, reply) => {
+    const { filename } = req.params as { filename: string };
+    const filepath = path.join(uploadsDir, path.basename(filename)); // prevent traversal
+    if (!fs.existsSync(filepath)) return reply.status(404).send({ message: 'File not found' });
+    const stream = fs.createReadStream(filepath);
+    return reply.send(stream);
+  });
 
-    // ── Auth plugin (session decorator) ──────────────────────
-    await app.register(authPlugin);
+  // ── Auth plugin (session decorator) ──────────────────────
+  await app.register(authPlugin);
 
-    // ── Error handler ─────────────────────────────────────────
-    app.setErrorHandler((error, req, reply) => {
-        const err = error as any;
+  // ── Error handler ─────────────────────────────────────────
+  app.setErrorHandler((error: any, req, reply) => {
+    const statusCode = error?.statusCode ?? 500;
+    const message = error?.message ?? 'Internal server error';
 
-        const statusCode = err.statusCode ?? 500;
-        const message = err.message ?? 'Internal server error';
+    if (statusCode >= 500) {
+      app.log.error({ err: error, url: req.url }, 'Internal error');
+    }
 
-        if (statusCode >= 500) {
-            app.log.error({ err: error, url: req.url }, 'Internal error');
-        }
+    reply.status(statusCode).send({ statusCode, message });
+  });
 
-        reply.status(statusCode).send({ statusCode, message });
-    });
+  // ── Routes ────────────────────────────────────────────────
+  const PREFIX = '/api/v1';
 
-    // ── Routes ────────────────────────────────────────────────
-    const PREFIX = '/api/v1';
+  // Health — public endpoint at /api/v1/health
+  await app.register(healthRoute, { prefix: PREFIX });
 
-    // Health — public endpoint at /api/v1/health
-    await app.register(healthRoute, { prefix: PREFIX });
+  // Auth
+  await app.register(authRoutes, { prefix: `${PREFIX}/auth` });
 
-    // Auth
-    await app.register(authRoutes, { prefix: `${PREFIX}/auth` });
+  // Access / RBAC
+  await app.register(accessRoutes, { prefix: `${PREFIX}/access` });
 
-    // Access / RBAC
-    await app.register(accessRoutes, { prefix: `${PREFIX}/access` });
+  // Employee (menus + orders endpoints at different paths)
+  await app.register(employeeRoutes, { prefix: PREFIX });
 
-    // Employee (menus + orders endpoints at different paths)
-    await app.register(employeeRoutes, { prefix: PREFIX });
+  // HR
+  await app.register(hrRoutes, { prefix: `${PREFIX}/hr` });
 
-    // HR
-    await app.register(hrRoutes, { prefix: `${PREFIX}/hr` });
+  // Ops
+  await app.register(opsRoutes, { prefix: `${PREFIX}/ops` });
 
-    // Ops
-    await app.register(opsRoutes, { prefix: `${PREFIX}/ops` });
+  // Admin (companies, users) - health is registered above at PREFIX level
+  await app.register(adminRoutes, { prefix: `${PREFIX}/admin` });
 
-    // Admin (companies, users) - health is registered above at PREFIX level
-    await app.register(adminRoutes, { prefix: `${PREFIX}/admin` });
+  // Studio
+  await app.register(studioRoutes, { prefix: `${PREFIX}/studio` });
 
-    // Studio
-    await app.register(studioRoutes, { prefix: `${PREFIX}/studio` });
+  // 404 handler
+  app.setNotFoundHandler((req, reply) => {
+    reply.status(404).send({ statusCode: 404, message: `Route ${req.method} ${req.url} not found` });
+  });
 
-    // 404 handler
-    app.setNotFoundHandler((req, reply) => {
-        reply.status(404).send({ statusCode: 404, message: `Route ${req.method} ${req.url} not found` });
-    });
-
-    return app;
+  return app;
 }
 
 async function main() {
-    // Init DB
-    await initDb();
-    runMigrations();
-    console.log('✓ Database ready');
+  // Init DB
+  await initDb();
+  await runMigrations();
+  console.log('✓ Database ready');
 
-    const app = await build();
+  const app = await build();
 
-    try {
-        await app.listen({ port: PORT, host: HOST });
-        console.log(`\n🍱 Manna API running on http://${HOST}:${PORT}`);
-        console.log(`   Env:   ${process.env.NODE_ENV ?? 'development'}`);
-        console.log(`   DB:    ${process.env.DB_PATH ?? './data/manna.db'}\n`);
-    } catch (err) {
-        app.log.error(err);
-        process.exit(1);
-    }
+  try {
+    await app.listen({ port: PORT, host: HOST });
+    console.log(`\n🍱 Manna API running on http://${HOST}:${PORT}`);
+    console.log(`   Env:   ${process.env.NODE_ENV ?? 'development'}`);
+    console.log(`   DB:    ${process.env.DB_PATH ?? './data/manna.db'}\n`);
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
 }
 
 main();

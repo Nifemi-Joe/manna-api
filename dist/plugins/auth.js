@@ -2,7 +2,7 @@
  * src/plugins/auth.ts
  * Fastify plugin that:
  *  - Reads the session cookie on every request
- *  - Decorates request with `user`, `session`, `requireAuth()`, `requirePermission()`
+ *  - Decorates request with `requireAuth()`, `requirePermission()`
  */
 import fp from 'fastify-plugin';
 import { getSession, getUserById, getUserPermissions, formatUser, SESSION_COOKIE } from '../services/auth.js';
@@ -14,7 +14,7 @@ const authPlugin = async (fastify) => {
         const sid = req.cookies?.[SESSION_COOKIE];
         if (!sid)
             return;
-        const session = getSession(sid);
+        const session = await getSession(sid);
         if (!session)
             return;
         req.sessionId = sid;
@@ -25,7 +25,7 @@ const authPlugin = async (fastify) => {
         if (!this.userId) {
             throw { statusCode: 401, message: 'Authentication required' };
         }
-        const user = getUserById(this.userId);
+        const user = await getUserById(this.userId);
         if (!user || user.status !== 'active') {
             throw { statusCode: 401, message: 'Session invalid or account suspended' };
         }
@@ -33,7 +33,7 @@ const authPlugin = async (fastify) => {
     });
     fastify.decorateRequest('requirePermission', async function (perm) {
         const user = await this.requireAuth();
-        const perms = getUserPermissions(this.userId);
+        const perms = await getUserPermissions(this.userId);
         if (!perms.includes(perm)) {
             throw { statusCode: 403, message: `Permission required: ${perm}` };
         }

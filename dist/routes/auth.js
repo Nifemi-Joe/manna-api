@@ -25,12 +25,12 @@ const authRoutes = async (fastify) => {
         if (!body.success)
             return reply.status(400).send({ message: 'Valid email required' });
         const { email } = body.data;
-        const user = getUserByEmail(email);
+        const user = await getUserByEmail(email);
         // Always return success to prevent email enumeration
         if (!user || user.status !== 'active') {
             return reply.send({ message: 'If that email is registered, a link has been sent.' });
         }
-        const token = createMagicToken(user.id);
+        const token = await createMagicToken(user.id);
         const link = await sendMagicLink(email, token);
         const response = {
             message: 'Magic link sent. Check your email.',
@@ -46,17 +46,17 @@ const authRoutes = async (fastify) => {
         const { token } = req.query;
         if (!token)
             return reply.status(400).send({ message: 'Token required' });
-        const result = verifyMagicToken(token);
+        const result = await verifyMagicToken(token);
         if (!result) {
             return reply.status(401).send({ message: 'Token is invalid or has expired' });
         }
-        const user = getUserById(result.userId);
+        const user = await getUserById(result.userId);
         if (!user || user.status !== 'active') {
             return reply.status(401).send({ message: 'Account not found or suspended' });
         }
-        const sessionId = createSession(user.id, user.portal);
+        const sessionId = await createSession(user.id, user.portal);
         reply.setCookie(SESSION_COOKIE, sessionId, COOKIE_OPTS);
-        const formatted = formatUser(user);
+        const formatted = await formatUser(user);
         return reply.send({
             token: sessionId,
             user: formatted,
@@ -67,7 +67,7 @@ const authRoutes = async (fastify) => {
     fastify.post('/logout', async (req, reply) => {
         const sid = req.cookies?.[SESSION_COOKIE];
         if (sid)
-            deleteSession(sid);
+            await deleteSession(sid);
         reply.clearCookie(SESSION_COOKIE, { path: '/' });
         return reply.send({ success: true });
     });
@@ -79,11 +79,11 @@ const authRoutes = async (fastify) => {
             return reply.status(400).send({ message: 'Invalid portal' });
         const { portal } = body.data;
         // Update user's portal and rotate session
-        dbRun('UPDATE users SET portal = ?, updated_at = datetime(\'now\') WHERE id = ?', [portal, user.id]);
+        await dbRun(`UPDATE users SET portal = $1, updated_at = now() WHERE id = $2`, [portal, user.id]);
         const oldSid = req.cookies?.[SESSION_COOKIE];
         if (oldSid)
-            deleteSession(oldSid);
-        const sessionId = createSession(user.id, portal);
+            await deleteSession(oldSid);
+        const sessionId = await createSession(user.id, portal);
         reply.setCookie(SESSION_COOKIE, sessionId, COOKIE_OPTS);
         return reply.send({ success: true });
     });

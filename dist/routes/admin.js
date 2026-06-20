@@ -29,7 +29,7 @@ const adminRoutes = async (fastify) => {
     // GET /api/v1/admin/companies
     fastify.get('/companies', async (req) => {
         await req.requirePermission('companies:read');
-        const companies = dbAll(`SELECT c.*,
+        const companies = await dbAll(`SELECT c.*,
               COUNT(DISTINCT u.id) as employee_count,
               COUNT(DISTINCT o.id) as order_count,
               COALESCE(SUM(o.total_amount), 0) as lifetime_spend
@@ -41,9 +41,9 @@ const adminRoutes = async (fastify) => {
             companies: companies.map(c => ({
                 id: c.id, name: c.name, slug: c.slug, plan: c.plan, status: c.status,
                 address: c.address, city: c.city,
-                employeeCount: c.employee_count,
-                orderCount: c.order_count,
-                lifetimeSpend: c.lifetime_spend,
+                employeeCount: parseInt(c.employee_count, 10),
+                orderCount: parseInt(c.order_count, 10),
+                lifetimeSpend: parseInt(c.lifetime_spend, 10),
                 createdAt: c.created_at,
             })),
             total: companies.length,
@@ -58,20 +58,20 @@ const adminRoutes = async (fastify) => {
         const { name, plan, address, city } = body.data;
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const id = nanoid();
-        const existing = dbGet('SELECT id FROM companies WHERE slug = ?', [slug]);
+        const existing = await dbGet('SELECT id FROM companies WHERE slug = $1', [slug]);
         if (existing)
             return reply.status(409).send({ message: 'Company with similar name already exists' });
-        dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city) VALUES (?, ?, ?, ?, 'active', ?, ?)`, [id, name, slug, plan, address, city]);
+        await dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city) VALUES ($1, $2, $3, $4, 'active', $5, $6)`, [id, name, slug, plan, address, city]);
         // Seed allowance rules
-        dbRun(`INSERT INTO allowance_rules (id, company_id, daily_amount) VALUES (?, ?, 2500)`, [nanoid(), id]);
-        const company = dbGet('SELECT * FROM companies WHERE id = ?', [id]);
+        await dbRun(`INSERT INTO allowance_rules (id, company_id, daily_amount) VALUES ($1, $2, 2500)`, [nanoid(), id]);
+        const company = await dbGet('SELECT * FROM companies WHERE id = $1', [id]);
         return reply.status(201).send({ company });
     });
     // PATCH /api/v1/admin/companies/:id
     fastify.patch('/companies/:id', async (req, reply) => {
         await req.requirePermission('companies:write');
         const { id } = req.params;
-        const company = dbGet('SELECT id FROM companies WHERE id = ?', [id]);
+        const company = await dbGet('SELECT id FROM companies WHERE id = $1', [id]);
         if (!company)
             return reply.status(404).send({ message: 'Company not found' });
         const body = z.object({
@@ -85,27 +85,27 @@ const adminRoutes = async (fastify) => {
         const updates = [];
         const params = [];
         if (body.data.name) {
-            updates.push('name = ?');
             params.push(body.data.name);
+            updates.push(`name = $${params.length}`);
         }
         if (body.data.plan) {
-            updates.push('plan = ?');
             params.push(body.data.plan);
+            updates.push(`plan = $${params.length}`);
         }
         if (body.data.status) {
-            updates.push('status = ?');
             params.push(body.data.status);
+            updates.push(`status = $${params.length}`);
         }
         if (body.data.address) {
-            updates.push('address = ?');
             params.push(body.data.address);
+            updates.push(`address = $${params.length}`);
         }
         if (updates.length) {
-            updates.push('updated_at = datetime(\'now\')');
+            updates.push('updated_at = now()');
             params.push(id);
-            dbRun(`UPDATE companies SET ${updates.join(', ')} WHERE id = ?`, params);
+            await dbRun(`UPDATE companies SET ${updates.join(', ')} WHERE id = $${params.length}`, params);
         }
-        const updated = dbGet('SELECT * FROM companies WHERE id = ?', [id]);
+        const updated = await dbGet('SELECT * FROM companies WHERE id = $1', [id]);
         return { company: updated };
     });
     // GET /api/v1/admin/users
@@ -115,15 +115,15 @@ const adminRoutes = async (fastify) => {
         const conditions = [];
         const params = [];
         if (query.portal) {
-            conditions.push('u.portal = ?');
             params.push(query.portal);
+            conditions.push(`u.portal = $${params.length}`);
         }
         if (query.status) {
-            conditions.push('u.status = ?');
             params.push(query.status);
+            conditions.push(`u.status = $${params.length}`);
         }
         const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-        const users = dbAll(`SELECT u.*, c.name as company_name FROM users u
+        const users = await dbAll(`SELECT u.*, c.name as company_name FROM users u
        LEFT JOIN companies c ON c.id = u.company_id
        ${where}
        ORDER BY u.created_at DESC`, params);
@@ -140,7 +140,7 @@ const adminRoutes = async (fastify) => {
     fastify.patch('/users/:id', async (req, reply) => {
         await req.requirePermission('users:write');
         const { id } = req.params;
-        const user = dbGet('SELECT id FROM users WHERE id = ?', [id]);
+        const user = await dbGet('SELECT id FROM users WHERE id = $1', [id]);
         if (!user)
             return reply.status(404).send({ message: 'User not found' });
         const body = z.object({
@@ -153,23 +153,23 @@ const adminRoutes = async (fastify) => {
         const updates = [];
         const params = [];
         if (body.data.name) {
-            updates.push('name = ?');
             params.push(body.data.name);
+            updates.push(`name = $${params.length}`);
         }
         if (body.data.portal) {
-            updates.push('portal = ?');
             params.push(body.data.portal);
+            updates.push(`portal = $${params.length}`);
         }
         if (body.data.status) {
-            updates.push('status = ?');
             params.push(body.data.status);
+            updates.push(`status = $${params.length}`);
         }
         if (updates.length) {
-            updates.push('updated_at = datetime(\'now\')');
+            updates.push('updated_at = now()');
             params.push(id);
-            dbRun(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
+            await dbRun(`UPDATE users SET ${updates.join(', ')} WHERE id = $${params.length}`, params);
         }
-        const updated = dbGet('SELECT u.*, c.name as company_name FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?', [id]);
+        const updated = await dbGet('SELECT u.*, c.name as company_name FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = $1', [id]);
         return {
             user: {
                 id: updated.id, email: updated.email, name: updated.name,

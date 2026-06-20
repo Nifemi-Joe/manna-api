@@ -13,6 +13,11 @@
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { dbAll, dbGet, dbRun } from '../db/index.js';
+function toDateStr(value) {
+    if (value instanceof Date)
+        return value.toISOString().slice(0, 10);
+    return String(value).slice(0, 10);
+}
 const updateDeliverySchema = z.object({
     status: z.enum(['scheduled', 'packed', 'dispatched', 'delivered', 'failed']),
     notes: z.string().optional(),
@@ -29,6 +34,19 @@ const updateIssueSchema = z.object({
     severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
     description: z.string().optional(),
 });
+function asArray(value) {
+    if (Array.isArray(value))
+        return value;
+    if (typeof value === 'string') {
+        try {
+            return JSON.parse(value);
+        }
+        catch {
+            return [];
+        }
+    }
+    return [];
+}
 const opsRoutes = async (fastify) => {
     // GET /api/v1/ops/deliveries
     fastify.get('/deliveries', async (req) => {
@@ -37,15 +55,15 @@ const opsRoutes = async (fastify) => {
         const conditions = [];
         const params = [];
         if (query.status) {
-            conditions.push('d.status = ?');
             params.push(query.status);
+            conditions.push(`d.status = $${params.length}`);
         }
         if (query.company) {
-            conditions.push('d.company_id = ?');
             params.push(query.company);
+            conditions.push(`d.company_id = $${params.length}`);
         }
         const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-        const rows = dbAll(`SELECT d.*, o.meal_name, o.notes as order_notes,
+        const rows = await dbAll(`SELECT d.*, o.meal_name, o.notes as order_notes,
               u.name as employee_name, u.email as employee_email,
               c.name as company_name,
               m.dietary
@@ -70,7 +88,7 @@ const opsRoutes = async (fastify) => {
                 scheduledFor: r.scheduled_for,
                 updatedAt: r.updated_at,
                 notes: r.notes ?? r.order_notes ?? undefined,
-                dietary: JSON.parse(r.dietary ?? '[]'),
+                dietary: asArray(r.dietary),
             })),
             total: rows.length,
         };
@@ -82,10 +100,10 @@ const opsRoutes = async (fastify) => {
         const body = updateDeliverySchema.safeParse(req.body);
         if (!body.success)
             return reply.status(400).send({ message: 'Invalid delivery update' });
-        const delivery = dbGet('SELECT * FROM deliveries WHERE id = ?', [id]);
+        const delivery = await dbGet('SELECT * FROM deliveries WHERE id = $1', [id]);
         if (!delivery)
             return reply.status(404).send({ message: 'Delivery not found' });
-        dbRun(`UPDATE deliveries SET status = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`, [body.data.status, body.data.notes ?? delivery.notes, id]);
+        await dbRun(`UPDATE deliveries SET status = $1, notes = $2, updated_at = now() WHERE id = $3`, [body.data.status, body.data.notes ?? delivery.notes, id]);
         // Sync order status
         const orderStatusMap = {
             packed: 'packed',
@@ -94,9 +112,15 @@ const opsRoutes = async (fastify) => {
             failed: 'failed',
         };
         if (orderStatusMap[body.data.status]) {
-            dbRun(`UPDATE orders SET status = ?, cancellable = 0, updated_at = datetime('now') WHERE id = ?`, [orderStatusMap[body.data.status], delivery.order_id]);
+            await dbRun(`UPDATE orders SET status = $1, cancellable = FALSE, updated_at = now() WHERE id = $2`, [orderStatusMap[body.data.status], delivery.order_id]);
         }
-        const updated = dbGet('SELECT d.*, c.name as company_name, u.name as employee_name, u.email as employee_email, o.meal_name, m.dietary FROM deliveries d JOIN orders o ON o.id = d.order_id JOIN users u ON u.id = o.user_id JOIN companies c ON c.id = d.company_id JOIN meals m ON m.id = o.meal_id WHERE d.id = ?', [id]);
+        const updated = await dbGet(`SELECT d.*, c.name as company_name, u.name as employee_name, u.email as employee_email, o.meal_name, m.dietary
+       FROM deliveries d
+       JOIN orders o ON o.id = d.order_id
+       JOIN users u ON u.id = o.user_id
+       JOIN companies c ON c.id = d.company_id
+       JOIN meals m ON m.id = o.meal_id
+       WHERE d.id = $1`, [id]);
         return {
             delivery: {
                 id: updated.id,
@@ -111,7 +135,7 @@ const opsRoutes = async (fastify) => {
                 scheduledFor: updated.scheduled_for,
                 updatedAt: updated.updated_at,
                 notes: updated.notes ?? undefined,
-                dietary: JSON.parse(updated.dietary ?? '[]'),
+                dietary: asArray(updated.dietary),
             },
         };
     });
@@ -122,19 +146,19 @@ const opsRoutes = async (fastify) => {
         const conditions = [];
         const params = [];
         if (query.status) {
-            conditions.push('i.status = ?');
             params.push(query.status);
+            conditions.push(`i.status = $${params.length}`);
         }
         if (query.severity) {
-            conditions.push('i.severity = ?');
             params.push(query.severity);
+            conditions.push(`i.severity = $${params.length}`);
         }
         if (query.company) {
-            conditions.push('i.company_id = ?');
             params.push(query.company);
+            conditions.push(`i.company_id = $${params.length}`);
         }
         const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-        const issues = dbAll(`SELECT i.*, c.name as company_name FROM issues i
+        const issues = await dbAll(`SELECT i.*, c.name as company_name FROM issues i
        LEFT JOIN companies c ON c.id = i.company_id
        ${where}
        ORDER BY i.created_at DESC`, params);
@@ -161,17 +185,17 @@ const opsRoutes = async (fastify) => {
         if (!body.success)
             return reply.status(400).send({ message: 'Invalid issue data', errors: body.error.flatten() });
         const id = nanoid();
-        dbRun(`INSERT INTO issues (id, company_id, order_id, reporter_id, title, description, severity, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'open')`, [id, body.data.companyId ?? null, body.data.orderId ?? null, user.id,
+        await dbRun(`INSERT INTO issues (id, company_id, order_id, reporter_id, title, description, severity, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`, [id, body.data.companyId ?? null, body.data.orderId ?? null, user.id,
             body.data.title, body.data.description ?? '', body.data.severity]);
-        const issue = dbGet('SELECT * FROM issues WHERE id = ?', [id]);
+        const issue = await dbGet('SELECT * FROM issues WHERE id = $1', [id]);
         return reply.status(201).send({ issue: formatIssue(issue) });
     });
     // PATCH /api/v1/ops/issues/:id
     fastify.patch('/issues/:id', async (req, reply) => {
         await req.requirePermission('issues:write');
         const { id } = req.params;
-        const issue = dbGet('SELECT id FROM issues WHERE id = ?', [id]);
+        const issue = await dbGet('SELECT id FROM issues WHERE id = $1', [id]);
         if (!issue)
             return reply.status(404).send({ message: 'Issue not found' });
         const body = updateIssueSchema.safeParse(req.body);
@@ -180,36 +204,36 @@ const opsRoutes = async (fastify) => {
         const updates = [];
         const params = [];
         if (body.data.status) {
-            updates.push('status = ?');
             params.push(body.data.status);
+            updates.push(`status = $${params.length}`);
         }
         if (body.data.severity) {
-            updates.push('severity = ?');
             params.push(body.data.severity);
+            updates.push(`severity = $${params.length}`);
         }
         if (body.data.description) {
-            updates.push('description = ?');
             params.push(body.data.description);
+            updates.push(`description = $${params.length}`);
         }
         if (updates.length) {
-            updates.push('updated_at = datetime(\'now\')');
+            updates.push('updated_at = now()');
             params.push(id);
-            dbRun(`UPDATE issues SET ${updates.join(', ')} WHERE id = ?`, params);
+            await dbRun(`UPDATE issues SET ${updates.join(', ')} WHERE id = $${params.length}`, params);
         }
-        const updated = dbGet('SELECT * FROM issues WHERE id = ?', [id]);
+        const updated = await dbGet('SELECT * FROM issues WHERE id = $1', [id]);
         return { issue: formatIssue(updated) };
     });
     // GET /api/v1/ops/packing — today's packing list grouped by company
     fastify.get('/packing', async (req) => {
         await req.requirePermission('deliveries:read');
         const today = new Date().toISOString().slice(0, 10);
-        const rows = dbAll(`SELECT o.meal_name, o.meal_id, u.name as employee_name, c.name as company_name, c.id as company_id,
+        const rows = await dbAll(`SELECT o.meal_name, o.meal_id, u.name as employee_name, c.name as company_name, c.id as company_id,
               m.dietary, m.allergens
        FROM orders o
        JOIN users u ON u.id = o.user_id
        JOIN companies c ON c.id = o.company_id
        JOIN meals m ON m.id = o.meal_id
-       WHERE o.date = ? AND o.status NOT IN ('cancelled', 'failed')
+       WHERE o.date = $1 AND o.status NOT IN ('cancelled', 'failed')
        ORDER BY c.name, o.meal_name, u.name`, [today]);
         // Group by company, then meal
         const grouped = {};
@@ -220,8 +244,8 @@ const opsRoutes = async (fastify) => {
             if (!grouped[r.company_id].meals[r.meal_name]) {
                 grouped[r.company_id].meals[r.meal_name] = {
                     mealId: r.meal_id, mealName: r.meal_name,
-                    dietary: JSON.parse(r.dietary ?? '[]'),
-                    allergens: JSON.parse(r.allergens ?? '[]'),
+                    dietary: asArray(r.dietary),
+                    allergens: asArray(r.allergens),
                     employees: [],
                 };
             }
@@ -241,7 +265,7 @@ const opsRoutes = async (fastify) => {
     fastify.get('/menus/:weekStart', async (req, reply) => {
         await req.requirePermission('menus:read');
         const { weekStart } = req.params;
-        const menu = dbGet('SELECT * FROM menus WHERE week_start = ?', [weekStart]);
+        const menu = await dbGet('SELECT * FROM menus WHERE week_start = $1', [weekStart]);
         if (!menu)
             return reply.status(404).send({ message: 'Menu not found' });
         return buildMenuResponse(menu);
@@ -257,36 +281,39 @@ const opsRoutes = async (fastify) => {
         }).safeParse(req.body);
         if (!body.success)
             return reply.status(400).send({ message: 'Invalid menu data' });
-        let menu = dbGet('SELECT * FROM menus WHERE week_start = ?', [weekStart]);
+        let menu = await dbGet('SELECT * FROM menus WHERE week_start = $1', [weekStart]);
         const caller = await req.requireAuth();
         if (!menu) {
             const id = nanoid();
-            dbRun(`INSERT INTO menus (id, week_start, published, created_by) VALUES (?, ?, 0, ?)`, [id, weekStart, caller.id]);
-            menu = dbGet('SELECT * FROM menus WHERE id = ?', [id]);
+            await dbRun(`INSERT INTO menus (id, week_start, published, created_by) VALUES ($1, $2, FALSE, $3)`, [id, weekStart, caller.id]);
+            menu = await dbGet('SELECT * FROM menus WHERE id = $1', [id]);
         }
         const { date, meals, cutoffTime } = body.data;
         const cutoff = cutoffTime ?? `${date}T10:00:00.000Z`;
         // Replace meals for this date
-        dbRun('DELETE FROM menu_meals WHERE menu_id = ? AND date = ?', [menu.id, date]);
+        await dbRun('DELETE FROM menu_meals WHERE menu_id = $1 AND date = $2', [menu.id, date]);
         for (const mealId of meals) {
-            const meal = dbGet('SELECT id FROM meals WHERE id = ?', [mealId]);
+            const meal = await dbGet('SELECT id FROM meals WHERE id = $1', [mealId]);
             if (meal) {
-                dbRun(`INSERT OR IGNORE INTO menu_meals (id, menu_id, date, meal_id, cutoff_time)
-           VALUES (?, ?, ?, ?, ?)`, [nanoid(), menu.id, date, mealId, cutoff]);
+                await dbRun(`INSERT INTO menu_meals (id, menu_id, date, meal_id, cutoff_time)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (menu_id, date, meal_id) DO NOTHING`, [nanoid(), menu.id, date, mealId, cutoff]);
             }
         }
-        dbRun(`UPDATE menus SET updated_at = datetime('now') WHERE id = ?`, [menu.id]);
-        return buildMenuResponse(dbGet('SELECT * FROM menus WHERE id = ?', [menu.id]));
+        await dbRun(`UPDATE menus SET updated_at = now() WHERE id = $1`, [menu.id]);
+        const refreshed = await dbGet('SELECT * FROM menus WHERE id = $1', [menu.id]);
+        return buildMenuResponse(refreshed);
     });
     // POST /api/v1/ops/menus/:weekStart/publish
     fastify.post('/menus/:weekStart/publish', async (req, reply) => {
         await req.requirePermission('menus:publish');
         const { weekStart } = req.params;
-        const menu = dbGet('SELECT * FROM menus WHERE week_start = ?', [weekStart]);
+        const menu = await dbGet('SELECT * FROM menus WHERE week_start = $1', [weekStart]);
         if (!menu)
             return reply.status(404).send({ message: 'Menu not found' });
-        dbRun(`UPDATE menus SET published = 1, published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`, [menu.id]);
-        return buildMenuResponse(dbGet('SELECT * FROM menus WHERE id = ?', [menu.id]));
+        await dbRun(`UPDATE menus SET published = TRUE, published_at = now(), updated_at = now() WHERE id = $1`, [menu.id]);
+        const refreshed = await dbGet('SELECT * FROM menus WHERE id = $1', [menu.id]);
+        return buildMenuResponse(refreshed);
     });
 };
 function formatIssue(i) {
@@ -296,24 +323,25 @@ function formatIssue(i) {
         createdAt: i.created_at, updatedAt: i.updated_at,
     };
 }
-function buildMenuResponse(menu) {
-    const mealRows = dbAll(`SELECT mm.date, mm.cutoff_time, m.* FROM menu_meals mm
+async function buildMenuResponse(menu) {
+    const mealRows = await dbAll(`SELECT mm.date, mm.cutoff_time, m.* FROM menu_meals mm
      JOIN meals m ON m.id = mm.meal_id
-     WHERE mm.menu_id = ? ORDER BY mm.date, m.name`, [menu.id]);
+     WHERE mm.menu_id = $1 ORDER BY mm.date, m.name`, [menu.id]);
     const dateMap = new Map();
     for (const r of mealRows) {
-        if (!dateMap.has(r.date))
-            dateMap.set(r.date, { date: r.date, cutoffTime: r.cutoff_time, meals: [] });
-        dateMap.get(r.date).meals.push({
+        const dateKey = toDateStr(r.date);
+        if (!dateMap.has(dateKey))
+            dateMap.set(dateKey, { date: dateKey, cutoffTime: r.cutoff_time, meals: [] });
+        dateMap.get(dateKey).meals.push({
             id: r.id, name: r.name, description: r.description, price: r.price,
-            spiceLevel: r.spice_level, allergens: JSON.parse(r.allergens ?? '[]'),
-            dietary: JSON.parse(r.dietary ?? '[]'), imageUrl: r.image_url ?? undefined,
-            available: r.available === 1,
+            spiceLevel: r.spice_level, allergens: asArray(r.allergens),
+            dietary: asArray(r.dietary), imageUrl: r.image_url ?? undefined,
+            available: r.available === true,
         });
     }
     return {
-        id: menu.id, weekStart: menu.week_start,
-        published: menu.published === 1, publishedAt: menu.published_at ?? undefined,
+        id: menu.id, weekStart: toDateStr(menu.week_start),
+        published: menu.published === true, publishedAt: menu.published_at ?? undefined,
         days: Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date)),
     };
 }

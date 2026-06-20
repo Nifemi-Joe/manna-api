@@ -42,7 +42,7 @@ async function build() {
     // ── CORS ──────────────────────────────────────────────────
     await app.register(cors, {
         origin: [
-            '*',
+            'http://localhost:3000',
             'http://127.0.0.1:3000',
             ...(process.env.APP_URL ? [process.env.APP_URL] : []),
         ],
@@ -83,9 +83,8 @@ async function build() {
     await app.register(authPlugin);
     // ── Error handler ─────────────────────────────────────────
     app.setErrorHandler((error, req, reply) => {
-        const err = error;
-        const statusCode = err.statusCode ?? 500;
-        const message = err.message ?? 'Internal server error';
+        const statusCode = error?.statusCode ?? 500;
+        const message = error?.message ?? 'Internal server error';
         if (statusCode >= 500) {
             app.log.error({ err: error, url: req.url }, 'Internal error');
         }
@@ -118,7 +117,7 @@ async function build() {
 async function main() {
     // Init DB
     await initDb();
-    runMigrations();
+    await runMigrations();
     console.log('✓ Database ready');
     const app = await build();
     try {

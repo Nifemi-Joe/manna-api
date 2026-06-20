@@ -3,7 +3,7 @@
  * Seeds development data. Safe to re-run (checks existence first).
  */
 import 'dotenv/config';
-import { initDb, dbGet, dbRun, persistDb } from './index.js';
+import { initDb, dbGet, dbRun } from './index.js';
 import { runMigrations } from './migrate.js';
 import { nanoid } from 'nanoid';
 function now() { return new Date().toISOString(); }
@@ -23,7 +23,7 @@ function dateOfWeek(offset) {
 }
 async function seed() {
     await initDb();
-    runMigrations();
+    await runMigrations();
     // ── Permissions ──────────────────────────────────────────
     const PERMS = [
         { key: 'orders:read', label: 'View orders', grp: 'Orders' },
@@ -60,61 +60,59 @@ async function seed() {
         { key: 'media:write', label: 'Upload/edit media', grp: 'Content' },
     ];
     for (const p of PERMS) {
-        const exists = dbGet('SELECT id FROM permissions WHERE key = ?', [p.key]);
+        const exists = await dbGet('SELECT id FROM permissions WHERE key = $1', [p.key]);
         if (!exists) {
-            dbRun('INSERT INTO permissions (id, key, label, grp) VALUES (?, ?, ?, ?)', [nanoid(), p.key, p.label, p.grp]);
+            await dbRun('INSERT INTO permissions (id, key, label, grp) VALUES ($1, $2, $3, $4)', [nanoid(), p.key, p.label, p.grp]);
         }
     }
     console.log('  ✓ Permissions seeded');
     // ── Companies ────────────────────────────────────────────
-    const existingCo = dbGet('SELECT id FROM companies WHERE slug = ?', ['techcorp-ng']);
+    const existingCo = await dbGet('SELECT id FROM companies WHERE slug = $1', ['techcorp-ng']);
     let coId = existingCo?.id;
     if (!coId) {
         coId = nanoid();
-        dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city, employees_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [coId, 'TechCorp Nigeria', 'techcorp-ng', 'growth', 'active',
+        await dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city, employees_count)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [coId, 'TechCorp Nigeria', 'techcorp-ng', 'growth', 'active',
             '14 Kofo Abayomi St, Victoria Island', 'Lagos', 24]);
     }
-    let co2Id = dbGet('SELECT id FROM companies WHERE slug = ?', ['fintech-lagos'])?.id;
+    const existingCo2 = await dbGet('SELECT id FROM companies WHERE slug = $1', ['fintech-lagos']);
+    let co2Id = existingCo2?.id;
     if (!co2Id) {
         co2Id = nanoid();
-        dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city, employees_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [co2Id, 'FinTech Lagos', 'fintech-lagos', 'starter', 'active',
+        await dbRun(`INSERT INTO companies (id, name, slug, plan, status, address, city, employees_count)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [co2Id, 'FinTech Lagos', 'fintech-lagos', 'starter', 'active',
             '7 Adeola Odeku, Victoria Island', 'Lagos', 11]);
     }
     console.log('  ✓ Companies seeded');
     // ── Users ────────────────────────────────────────────────
     const USERS = [
-        // Admin / Ops / Studio (no company)
         { id: 'u-admin-1', email: 'admin@mannaworkmeals.com', name: 'Chidi Okeke', portal: 'admin', companyId: null },
         { id: 'u-ops-1', email: 'ops@mannaworkmeals.com', name: 'Emeka Nwosu', portal: 'ops', companyId: null },
         { id: 'u-studio-1', email: 'content@mannaworkmeals.com', name: 'Amara Okafor', portal: 'studio', companyId: null },
-        // HR users per company
         { id: 'u-hr-1', email: 'hr@techcorp.ng', name: 'Ngozi Adeyemi', portal: 'hr', companyId: coId },
         { id: 'u-hr-2', email: 'hr@fintechlagos.com', name: 'Kelechi Eze', portal: 'hr', companyId: co2Id },
-        // Employees TechCorp
         { id: 'u-emp-1', email: 'tunde.afolabi@techcorp.ng', name: 'Tunde Afolabi', portal: 'employee', companyId: coId },
         { id: 'u-emp-2', email: 'adaeze.okonkwo@techcorp.ng', name: 'Adaeze Okonkwo', portal: 'employee', companyId: coId },
         { id: 'u-emp-3', email: 'seun.bello@techcorp.ng', name: 'Seun Bello', portal: 'employee', companyId: coId },
         { id: 'u-emp-4', email: 'yemi.johnson@techcorp.ng', name: 'Yemi Johnson', portal: 'employee', companyId: coId },
-        // Employees FinTech
         { id: 'u-emp-5', email: 'damilola.taiwo@fintechlagos.com', name: 'Damilola Taiwo', portal: 'employee', companyId: co2Id },
         { id: 'u-emp-6', email: 'ibrahim.musa@fintechlagos.com', name: 'Ibrahim Musa', portal: 'employee', companyId: co2Id },
     ];
     for (const u of USERS) {
-        const exists = dbGet('SELECT id FROM users WHERE id = ?', [u.id]);
+        const exists = await dbGet('SELECT id FROM users WHERE id = $1', [u.id]);
         if (!exists) {
-            dbRun(`INSERT INTO users (id, email, name, portal, company_id, status)
-         VALUES (?, ?, ?, ?, ?, 'active')`, [u.id, u.email, u.name, u.portal, u.companyId]);
+            await dbRun(`INSERT INTO users (id, email, name, portal, company_id, status)
+         VALUES ($1, $2, $3, $4, $5, 'active')`, [u.id, u.email, u.name, u.portal, u.companyId]);
         }
     }
     console.log('  ✓ Users seeded');
     // ── Allowance rules ──────────────────────────────────────
-    for (const [cId, dailyAmt] of [[coId, 3000], [co2Id, 2500]]) {
-        const exists = dbGet('SELECT id FROM allowance_rules WHERE company_id = ?', [cId]);
+    const allowancePairs = [[coId, 3000], [co2Id, 2500]];
+    for (const [cId, dailyAmt] of allowancePairs) {
+        const exists = await dbGet('SELECT id FROM allowance_rules WHERE company_id = $1', [cId]);
         if (!exists) {
-            dbRun(`INSERT INTO allowance_rules (id, company_id, daily_amount, monthly_cap_enabled, meal_type, allow_top_ups, max_top_up, max_meals_per_day)
-         VALUES (?, ?, ?, 0, 'lunch', 1, 5000, 1)`, [nanoid(), cId, dailyAmt]);
+            await dbRun(`INSERT INTO allowance_rules (id, company_id, daily_amount, monthly_cap_enabled, meal_type, allow_top_ups, max_top_up, max_meals_per_day)
+         VALUES ($1, $2, $3, FALSE, 'lunch', TRUE, 5000, 1)`, [nanoid(), cId, dailyAmt]);
         }
     }
     console.log('  ✓ Allowance rules seeded');
@@ -127,13 +125,13 @@ async function seed() {
         { id: 'role-studio', name: 'Content Editor', perms: ['content:read', 'content:write', 'content:publish', 'media:read', 'media:write'] },
     ];
     for (const r of SYSTEM_ROLES) {
-        const exists = dbGet('SELECT id FROM roles WHERE id = ?', [r.id]);
+        const exists = await dbGet('SELECT id FROM roles WHERE id = $1', [r.id]);
         if (!exists) {
-            dbRun(`INSERT INTO roles (id, name, scope, company_id) VALUES (?, ?, 'system', NULL)`, [r.id, r.name]);
+            await dbRun(`INSERT INTO roles (id, name, scope, company_id) VALUES ($1, $2, 'system', NULL)`, [r.id, r.name]);
             for (const pk of r.perms) {
-                const perm = dbGet('SELECT id FROM permissions WHERE key = ?', [pk]);
+                const perm = await dbGet('SELECT id FROM permissions WHERE key = $1', [pk]);
                 if (perm) {
-                    dbRun('INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)', [r.id, perm.id]);
+                    await dbRun('INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [r.id, perm.id]);
                 }
             }
         }
@@ -154,10 +152,10 @@ async function seed() {
         { uid: 'u-emp-6', rid: 'role-employee' },
     ];
     for (const a of ASSIGNMENTS) {
-        const exists = dbGet('SELECT id FROM role_assignments WHERE user_id = ? AND role_id = ?', [a.uid, a.rid]);
+        const exists = await dbGet('SELECT id FROM role_assignments WHERE user_id = $1 AND role_id = $2', [a.uid, a.rid]);
         if (!exists) {
-            dbRun(`INSERT INTO role_assignments (id, user_id, role_id, assigned_by, status)
-         VALUES (?, ?, ?, 'system', 'active')`, [nanoid(), a.uid, a.rid]);
+            await dbRun(`INSERT INTO role_assignments (id, user_id, role_id, assigned_by, status)
+         VALUES ($1, $2, $3, 'system', 'active')`, [nanoid(), a.uid, a.rid]);
         }
     }
     console.log('  ✓ Role assignments seeded');
@@ -181,22 +179,21 @@ async function seed() {
         { id: 'm-tofu', name: 'Tofu Stir Fry & Rice', description: 'Pan-fried tofu with bok choy and ginger soy sauce.', price: 2400, spice: 'mild', allergens: '[{"id":"a6","label":"soy"}]', dietary: '[{"id":"d2","label":"vegan"},{"id":"d4","label":"gluten-free"}]' },
     ];
     for (const m of MEALS) {
-        const exists = dbGet('SELECT id FROM meals WHERE id = ?', [m.id]);
+        const exists = await dbGet('SELECT id FROM meals WHERE id = $1', [m.id]);
         if (!exists) {
-            dbRun(`INSERT INTO meals (id, name, description, price, spice_level, allergens, dietary, available)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`, [m.id, m.name, m.description, m.price, m.spice, m.allergens, m.dietary]);
+            await dbRun(`INSERT INTO meals (id, name, description, price, spice_level, allergens, dietary, available)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)`, [m.id, m.name, m.description, m.price, m.spice, m.allergens, m.dietary]);
         }
     }
     console.log('  ✓ Meals seeded');
     // ── This week's menu ─────────────────────────────────────
     const ws = weekStart();
-    const existingMenu = dbGet('SELECT id FROM menus WHERE week_start = ?', [ws]);
+    const existingMenu = await dbGet('SELECT id FROM menus WHERE week_start = $1', [ws]);
     let menuId = existingMenu?.id;
     if (!menuId) {
         menuId = nanoid();
-        dbRun(`INSERT INTO menus (id, week_start, published, published_at, created_by)
-       VALUES (?, ?, 1, ?, 'system')`, [menuId, ws, now()]);
-        // Daily meal assignments (5 meals per day Mon-Fri)
+        await dbRun(`INSERT INTO menus (id, week_start, published, published_at, created_by)
+       VALUES ($1, $2, TRUE, $3, 'system')`, [menuId, ws, now()]);
         const DAILY_MEALS = {
             0: ['m-jollof', 'm-egusi', 'm-moimoi', 'm-ofada', 'm-pasta', 'm-tilapia'],
             1: ['m-pepper', 'm-friedrice', 'm-beans', 'm-oha', 'm-shawarma', 'm-tofu'],
@@ -208,8 +205,9 @@ async function seed() {
             const date = dateOfWeek(dayOffset);
             const cutoff = `${date}T10:00:00.000Z`;
             for (const mId of DAILY_MEALS[dayOffset]) {
-                dbRun(`INSERT OR IGNORE INTO menu_meals (id, menu_id, date, meal_id, cutoff_time)
-           VALUES (?, ?, ?, ?, ?)`, [nanoid(), menuId, date, mId, cutoff]);
+                await dbRun(`INSERT INTO menu_meals (id, menu_id, date, meal_id, cutoff_time)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (menu_id, date, meal_id) DO NOTHING`, [nanoid(), menuId, date, mId, cutoff]);
             }
         }
     }
@@ -233,17 +231,16 @@ async function seed() {
         const d = new Date();
         d.setDate(d.getDate() - daysBack);
         const date = d.toISOString().slice(0, 10);
-        const existing = dbGet('SELECT id FROM orders WHERE user_id = ? AND meal_id = ? AND date = ?', [m.userId, m.mealId, date]);
+        const existing = await dbGet('SELECT id FROM orders WHERE user_id = $1 AND date = $2', [m.userId, date]);
         if (!existing) {
             const companyId = ['u-emp-1', 'u-emp-2', 'u-emp-3', 'u-emp-4'].includes(m.userId) ? coId : co2Id;
             const allowanceCovered = Math.min(m.price, 3000);
             const empPaid = Math.max(0, m.price - allowanceCovered);
             const orderId = nanoid();
-            dbRun(`INSERT INTO orders (id, user_id, company_id, meal_id, meal_name, date, status, total_amount, allowance_covered, employee_paid, delivery_address, cancellable)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`, [orderId, m.userId, companyId, m.mealId, m.mealName, date, m.status, m.price, allowanceCovered, empPaid, '14 Kofo Abayomi St, Victoria Island, Lagos']);
-            // Create delivery
-            dbRun(`INSERT INTO deliveries (id, order_id, company_id, status, delivery_address, scheduled_for)
-         VALUES (?, ?, ?, ?, ?, ?)`, [nanoid(), orderId, companyId, m.status === 'delivered' ? 'delivered' : 'scheduled',
+            await dbRun(`INSERT INTO orders (id, user_id, company_id, meal_id, meal_name, date, status, total_amount, allowance_covered, employee_paid, delivery_address, cancellable)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, FALSE)`, [orderId, m.userId, companyId, m.mealId, m.mealName, date, m.status, m.price, allowanceCovered, empPaid, '14 Kofo Abayomi St, Victoria Island, Lagos']);
+            await dbRun(`INSERT INTO deliveries (id, order_id, company_id, status, delivery_address, scheduled_for)
+         VALUES ($1, $2, $3, $4, $5, $6)`, [nanoid(), orderId, companyId, m.status === 'delivered' ? 'delivered' : 'scheduled',
                 '14 Kofo Abayomi St, Victoria Island, Lagos',
                 `${date}T12:30:00.000Z`]);
         }
@@ -251,25 +248,35 @@ async function seed() {
     console.log('  ✓ Sample orders seeded');
     // ── Content entries ──────────────────────────────────────
     const CONTENT = [
-        { key: 'landing/hero', type: 'markdown', title: 'Hero Section', section: 'landing', status: 'published',
-            content: '# Office meals, finally under control.\n\nManna handles daily lunch for your team — HR sets the budget, employees order from a fresh menu, and we deliver. Simple.' },
-        { key: 'landing/cta', type: 'markdown', title: 'CTA Section', section: 'landing', status: 'published',
-            content: '## Ready to transform your office meals?\n\nJoin pilot companies across Lagos Island and Victoria Island.' },
-        { key: 'landing/benefits', type: 'markdown', title: 'Benefits Grid', section: 'landing', status: 'draft',
-            content: '## Why Manna?\n\n- **No logistics stress** — we handle everything\n- **Budget control** — set allowances per employee\n- **Fresh daily menus** — real Nigerian food' },
-        { key: 'faq/hr', type: 'json', title: 'HR FAQs', section: 'faq', status: 'published',
+        {
+            key: 'landing/hero', type: 'markdown', title: 'Hero Section', section: 'landing', status: 'published',
+            content: '# Office meals, finally under control.\n\nManna handles daily lunch for your team — HR sets the budget, employees order from a fresh menu, and we deliver. Simple.',
+        },
+        {
+            key: 'landing/cta', type: 'markdown', title: 'CTA Section', section: 'landing', status: 'published',
+            content: '## Ready to transform your office meals?\n\nJoin pilot companies across Lagos Island and Victoria Island.',
+        },
+        {
+            key: 'landing/benefits', type: 'markdown', title: 'Benefits Grid', section: 'landing', status: 'draft',
+            content: '## Why Manna?\n\n- **No logistics stress** — we handle everything\n- **Budget control** — set allowances per employee\n- **Fresh daily menus** — real Nigerian food',
+        },
+        {
+            key: 'faq/hr', type: 'json', title: 'HR FAQs', section: 'faq', status: 'published',
             content: JSON.stringify([
                 { q: 'How do I get started?', a: 'Request a pilot via the landing page.' },
                 { q: 'How does billing work?', a: 'Monthly invoice, due within 7 days.' },
-            ]) },
-        { key: 'email/welcome', type: 'text', title: 'Welcome Email', section: 'email', status: 'draft',
-            content: 'Welcome to Manna! Your daily lunch benefit is now active.' },
+            ]),
+        },
+        {
+            key: 'email/welcome', type: 'text', title: 'Welcome Email', section: 'email', status: 'draft',
+            content: 'Welcome to Manna! Your daily lunch benefit is now active.',
+        },
     ];
     for (const c of CONTENT) {
-        const exists = dbGet('SELECT key FROM content_entries WHERE key = ?', [c.key]);
+        const exists = await dbGet('SELECT key FROM content_entries WHERE key = $1', [c.key]);
         if (!exists) {
-            dbRun(`INSERT INTO content_entries (key, type, title, status, section, content, edited_by, last_published_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'system', ?)`, [c.key, c.type, c.title, c.status, c.section, c.content,
+            await dbRun(`INSERT INTO content_entries (key, type, title, status, section, content, edited_by, last_published_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'system', $7)`, [c.key, c.type, c.title, c.status, c.section, c.content,
                 c.status === 'published' ? daysAgo(10) : null]);
         }
     }
@@ -281,14 +288,15 @@ async function seed() {
         { title: 'Wrong meal — Pasta instead of Ofada', description: 'Employee received pasta instead of ordered Ofada Rice.', severity: 'medium', status: 'open', companyId: co2Id },
     ];
     for (const iss of ISSUES) {
-        const exists = dbGet('SELECT id FROM issues WHERE title = ?', [iss.title]);
+        const exists = await dbGet('SELECT id FROM issues WHERE title = $1', [iss.title]);
         if (!exists) {
-            dbRun(`INSERT INTO issues (id, company_id, title, description, severity, status)
-         VALUES (?, ?, ?, ?, ?, ?)`, [nanoid(), iss.companyId, iss.title, iss.description, iss.severity, iss.status]);
+            await dbRun(`INSERT INTO issues (id, company_id, title, description, severity, status)
+         VALUES ($1, $2, $3, $4, $5, $6)`, [nanoid(), iss.companyId, iss.title, iss.description, iss.severity, iss.status]);
         }
     }
     console.log('  ✓ Issues seeded');
-    persistDb();
     console.log('\n✅ Seed complete.');
 }
-seed().catch(e => { console.error(e); process.exit(1); });
+seed()
+    .then(() => process.exit(0))
+    .catch(e => { console.error(e); process.exit(1); });
