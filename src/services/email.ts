@@ -14,7 +14,7 @@ const isDev = process.env.NODE_ENV !== 'production';
 // at import time in environments (like local dev) that don't set one.
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
-const FROM = process.env.EMAIL_FROM ?? 'Manna Office Meals <noreply@mannaworkmeals.com>';
+const FROM = process.env.EMAIL_FROM ?? 'Manna Office Meals <admin@mannaworkmeals.com>';
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const MAGIC_LINK_EXPIRY_MINUTES = process.env.MAGIC_LINK_EXPIRY_MINUTES ?? '15';
 
