@@ -11,7 +11,7 @@
  *   2. Webhooks → Add Endpoint → point at:
  *        https://<your-api-domain>/api/v1/webhooks/resend
  *      Subscribe to the events you care about (at minimum `email.received`).
- *   3. Copy the generated "Signing Secret" into RESEND_WEBHOOK_SECRET in .env.
+ *   3. Copy the generated "Signing Secret" into RESEND_WEBHOOK_SECRET in .env.local.
  *
  * Resend signs webhook payloads using Svix-style headers:
  *   webhook-id, webhook-timestamp, webhook-signature
