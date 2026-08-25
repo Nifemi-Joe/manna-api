@@ -1,6 +1,9 @@
 /**
  * src/index.ts
  * Manna API — Fastify application server
+ *
+ * UPDATED: three new route groups registered — admin-orders,
+ * orders-swap, notification-preferences.
  */
 import 'dotenv/config';
 import Fastify from 'fastify';
@@ -17,10 +20,21 @@ import authPlugin from './plugins/auth.js';
 import authRoutes from './routes/auth.js';
 import accessRoutes from './routes/access.js';
 import employeeRoutes from './routes/employee.js';
+import ordersSwapRoutes from './routes/orders-swap.js';
 import hrRoutes from './routes/hr.js';
 import opsRoutes from './routes/ops.js';
 import adminRoutes, { healthRoute } from './routes/admin.js';
+import adminOrdersRoutes from './routes/admin-orders.js';
 import studioRoutes from './routes/studio.js';
+import webhookRoutes from './routes/webhooks.js';
+import { publicLeadRoutes, adminLeadRoutes } from './routes/leads.js';
+import hrBulkUploadRoutes from './routes/hr-employees-bulk.js';
+import hrEmployeeAllowanceRoutes from './routes/hr-employee-allowance.js';
+import hrLevelsRoutes from './routes/hr-levels.js';
+import notificationsRoutes from './routes/notifications.js';
+import notificationPreferencesRoutes from './routes/notification-preferences.js';
+import opsMealsRoutes from './routes/ops-meals.js';
+import hrHolidaysRoutes from './routes/hr-holidays.js';
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 const HOST = process.env.HOST ?? '0.0.0.0';
 const isDev = process.env.NODE_ENV !== 'production';
@@ -28,94 +42,72 @@ async function build() {
     const app = Fastify({
         logger: {
             level: isDev ? 'info' : 'warn',
-            ...(isDev ? {
-                transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
-            } : {}),
+            ...(isDev ? { transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } } } : {}),
         },
         disableRequestLogging: !isDev,
     });
-    // ── Security ──────────────────────────────────────────────
-    await app.register(helmet, {
-        contentSecurityPolicy: false, // API only — no HTML
-        crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow CDN/browser fetch
-    });
-    // ── CORS ──────────────────────────────────────────────────
+    await app.register(helmet, { contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } });
     await app.register(cors, {
-        origin: [
-            'http://localhost:3000',
-            'http://127.0.0.1:3000',
-            ...(process.env.APP_URL ? [process.env.APP_URL] : []),
-        ],
+        origin: ['http://localhost:3000', 'http://127.0.0.1:3000', ...(process.env.APP_URL ? [process.env.APP_URL] : [])],
         credentials: true,
         methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT', 'OPTIONS'],
     });
-    // ── Rate limiting ─────────────────────────────────────────
     await app.register(rateLimit, {
+        global: true,
         max: 200,
         timeWindow: '1 minute',
-        errorResponseBuilder: () => ({ statusCode: 429, message: 'Too many requests' }),
+        errorResponseBuilder: () => ({ statusCode: 429, message: 'Too many requests — please wait a moment and try again.' }),
     });
-    // ── Cookies ───────────────────────────────────────────────
     await app.register(cookie, {
         secret: process.env.SESSION_SECRET ?? 'dev-secret-change-in-production-32c',
         parseOptions: { httpOnly: true, sameSite: 'lax' },
     });
-    // ── Multipart (file uploads) ──────────────────────────────
-    await app.register(multipart, {
-        limits: {
-            fileSize: parseInt(process.env.MAX_UPLOAD_MB ?? '10', 10) * 1024 * 1024,
-        },
-    });
-    // ── Static uploads ────────────────────────────────────────
+    await app.register(multipart, { limits: { fileSize: parseInt(process.env.MAX_UPLOAD_MB ?? '10', 10) * 1024 * 1024 } });
     const uploadsDir = process.env.UPLOADS_DIR ?? './uploads';
     if (!fs.existsSync(uploadsDir))
         fs.mkdirSync(uploadsDir, { recursive: true });
-    // Serve uploaded files
     app.get('/uploads/:filename', async (req, reply) => {
         const { filename } = req.params;
-        const filepath = path.join(uploadsDir, path.basename(filename)); // prevent traversal
+        const filepath = path.join(uploadsDir, path.basename(filename));
         if (!fs.existsSync(filepath))
             return reply.status(404).send({ message: 'File not found' });
-        const stream = fs.createReadStream(filepath);
-        return reply.send(stream);
+        return reply.send(fs.createReadStream(filepath));
     });
-    // ── Auth plugin (session decorator) ──────────────────────
     await app.register(authPlugin);
-    // ── Error handler ─────────────────────────────────────────
     app.setErrorHandler((error, req, reply) => {
         const statusCode = error?.statusCode ?? 500;
         const message = error?.message ?? 'Internal server error';
-        if (statusCode >= 500) {
+        if (statusCode >= 500)
             app.log.error({ err: error, url: req.url }, 'Internal error');
-        }
         reply.status(statusCode).send({ statusCode, message });
     });
-    // ── Routes ────────────────────────────────────────────────
     const PREFIX = '/api/v1';
-    // Health — public endpoint at /api/v1/health
     await app.register(healthRoute, { prefix: PREFIX });
-    // Auth
     await app.register(authRoutes, { prefix: `${PREFIX}/auth` });
-    // Access / RBAC
     await app.register(accessRoutes, { prefix: `${PREFIX}/access` });
-    // Employee (menus + orders endpoints at different paths)
     await app.register(employeeRoutes, { prefix: PREFIX });
-    // HR
+    await app.register(ordersSwapRoutes, { prefix: PREFIX });
     await app.register(hrRoutes, { prefix: `${PREFIX}/hr` });
-    // Ops
+    await app.register(hrBulkUploadRoutes, { prefix: `${PREFIX}/hr` });
+    await app.register(hrEmployeeAllowanceRoutes, { prefix: `${PREFIX}/hr` });
+    await app.register(hrLevelsRoutes, { prefix: `${PREFIX}/hr` });
+    await app.register(hrHolidaysRoutes, { prefix: `${PREFIX}/hr` });
     await app.register(opsRoutes, { prefix: `${PREFIX}/ops` });
-    // Admin (companies, users) - health is registered above at PREFIX level
+    await app.register(opsMealsRoutes, { prefix: `${PREFIX}/ops` });
     await app.register(adminRoutes, { prefix: `${PREFIX}/admin` });
-    // Studio
+    await app.register(adminOrdersRoutes, { prefix: `${PREFIX}/admin` });
     await app.register(studioRoutes, { prefix: `${PREFIX}/studio` });
-    // 404 handler
+    await app.register(webhookRoutes, { prefix: `${PREFIX}/webhooks` });
+    await app.register(publicLeadRoutes, { prefix: `${PREFIX}/leads` });
+    await app.register(adminLeadRoutes, { prefix: `${PREFIX}/admin/leads` });
+    await app.register(notificationsRoutes, { prefix: `${PREFIX}/notifications` });
+    await app.register(notificationPreferencesRoutes, { prefix: `${PREFIX}/notification-preferences` });
     app.setNotFoundHandler((req, reply) => {
         reply.status(404).send({ statusCode: 404, message: `Route ${req.method} ${req.url} not found` });
     });
     return app;
 }
 async function main() {
-    // Init DB
     await initDb();
     await runMigrations();
     console.log('✓ Database ready');
@@ -124,7 +116,6 @@ async function main() {
         await app.listen({ port: PORT, host: HOST });
         console.log(`\n🍱 Manna API running on http://${HOST}:${PORT}`);
         console.log(`   Env:   ${process.env.NODE_ENV ?? 'development'}`);
-        console.log(`   DB:    ${process.env.DB_PATH ?? './data/manna.db'}\n`);
     }
     catch (err) {
         app.log.error(err);

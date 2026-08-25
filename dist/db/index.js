@@ -14,7 +14,7 @@
 import { Pool } from 'pg';
 const CONNECTION_STRING = process.env.DATABASE_URL;
 if (!CONNECTION_STRING) {
-    throw new Error('DATABASE_URL is not set. Add your Neon connection string to .env, e.g.\n' +
+    throw new Error('DATABASE_URL is not set. Add your Neon connection string to .env.local, e.g.\n' +
         'DATABASE_URL=postgresql://user:password@ep-xxxx.neon.tech/dbname?sslmode=require');
 }
 let pool;
