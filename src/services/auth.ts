@@ -74,7 +74,7 @@ export async function createOtpCode(userId: string): Promise<string> {
 }
 
 export type OtpVerifyResult =
-    | { ok: true; userId: string }
+    | { ok: true; userId: string; reason: string }
     | { ok: false; reason: 'not_found' | 'expired' | 'used' | 'too_many_attempts' | 'incorrect_code' };
 
 /**

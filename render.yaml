@@ -6,18 +6,22 @@ services:
   - type: web
     name: manna-api
     runtime: node
-    region: frankfurt          # pick whatever's geographically closest to Lagos-served traffic
-    plan: starter               # free tier sleeps after inactivity — bad for a login flow people rely on; starter stays warm
-    buildCommand: npm install && npm run build
+    region: frankfurt
+    plan: starter
+    buildCommand: |
+      npm install
+      npm run build
+      npm run seed || echo "Seeding failed but continuing..."  # Runs after build
+      npm run send-daily-menu || echo "Seeding failed but continuing..."  # Runs after build
     startCommand: npm start
-    healthCheckPath: /api/v1/health   # you already have this route — Render pings it to know you're alive
+    healthCheckPath: /api/v1/health
     envVars:
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
-        sync: false            # set manually in Render's dashboard — never commit this
+        sync: false
       - key: SESSION_SECRET
-        generateValue: true    # let Render generate a real random 32+ char secret for you
+        generateValue: true
       - key: RESEND_API_KEY
         sync: false
       - key: EMAIL_FROM
@@ -25,16 +29,12 @@ services:
       - key: TERMII_API_KEY
         sync: false
       - key: APP_URL
-        sync: false            # your Netlify frontend URL — set once you have it
+        sync: false
       - key: ALLOW_DEBUG_LOGIN_LINK
-        value: "false"          # CRITICAL — see checklist below
+        value: "false"
       - key: UPLOADS_DIR
         value: /var/data/uploads
 
-# A persistent disk — WITHOUT this, every meal photo Ops uploads through
-# the Meal Library gets wiped on every deploy or restart, because
-# Render's default filesystem is ephemeral. This is not optional if
-# you're using the local-disk upload feature we built.
 disk:
   name: manna-uploads
   mountPath: /var/data
