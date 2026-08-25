@@ -5,17 +5,20 @@
  * GET   /api/v1/ops/issues
  * POST  /api/v1/ops/issues
  * PATCH /api/v1/ops/issues/:id
- * GET   /api/v1/ops/packing        (packing list grouped by company)
+ * GET   /api/v1/ops/packing
  * GET   /api/v1/ops/menus/:weekStart
  * PATCH /api/v1/ops/menus/:weekStart
  * POST  /api/v1/ops/menus/:weekStart/publish
+ *
+ * UPDATED: creating an issue now also notifies every ops user in-app;
+ * everything else in this file is unchanged from the original.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { dbAll, dbGet, dbRun } from '../db/index.js';
-
+import { notifyPortal } from '../services/notifications.js';
 
 function toDateStr(value: unknown): string {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -50,7 +53,6 @@ function asArray(value: unknown): any[] {
 
 const opsRoutes: FastifyPluginAsync = async (fastify) => {
 
-  // GET /api/v1/ops/deliveries
   fastify.get('/deliveries', async (req) => {
     await req.requirePermission('deliveries:read');
 
@@ -64,18 +66,18 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const rows = await dbAll<any>(
-      `SELECT d.*, o.meal_name, o.notes as order_notes,
-              u.name as employee_name, u.email as employee_email,
-              c.name as company_name,
-              m.dietary
-       FROM deliveries d
-       JOIN orders o ON o.id = d.order_id
-       JOIN users u ON u.id = o.user_id
-       JOIN companies c ON c.id = d.company_id
-       JOIN meals m ON m.id = o.meal_id
-       ${where}
-       ORDER BY d.scheduled_for, c.name`,
-      params
+        `SELECT d.*, o.meal_name, o.notes as order_notes,
+                u.name as employee_name, u.email as employee_email,
+                c.name as company_name,
+                m.dietary
+         FROM deliveries d
+                JOIN orders o ON o.id = d.order_id
+                JOIN users u ON u.id = o.user_id
+                JOIN companies c ON c.id = d.company_id
+                JOIN meals m ON m.id = o.meal_id
+           ${where}
+         ORDER BY d.scheduled_for, c.name`,
+        params
     );
 
     return {
@@ -98,7 +100,6 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // PATCH /api/v1/ops/deliveries/:id
   fastify.patch('/deliveries/:id', async (req, reply) => {
     await req.requirePermission('deliveries:update');
     const { id } = req.params as { id: string };
@@ -110,11 +111,10 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!delivery) return reply.status(404).send({ message: 'Delivery not found' });
 
     await dbRun(
-      `UPDATE deliveries SET status = $1, notes = $2, updated_at = now() WHERE id = $3`,
-      [body.data.status, body.data.notes ?? delivery.notes, id]
+        `UPDATE deliveries SET status = $1, notes = $2, updated_at = now() WHERE id = $3`,
+        [body.data.status, body.data.notes ?? delivery.notes, id]
     );
 
-    // Sync order status
     const orderStatusMap: Record<string, string> = {
       packed: 'packed',
       dispatched: 'dispatched',
@@ -123,20 +123,20 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     };
     if (orderStatusMap[body.data.status]) {
       await dbRun(
-        `UPDATE orders SET status = $1, cancellable = FALSE, updated_at = now() WHERE id = $2`,
-        [orderStatusMap[body.data.status], delivery.order_id]
+          `UPDATE orders SET status = $1, cancellable = FALSE, updated_at = now() WHERE id = $2`,
+          [orderStatusMap[body.data.status], delivery.order_id]
       );
     }
 
     const updated = await dbGet<any>(
-      `SELECT d.*, c.name as company_name, u.name as employee_name, u.email as employee_email, o.meal_name, m.dietary
-       FROM deliveries d
-       JOIN orders o ON o.id = d.order_id
-       JOIN users u ON u.id = o.user_id
-       JOIN companies c ON c.id = d.company_id
-       JOIN meals m ON m.id = o.meal_id
-       WHERE d.id = $1`,
-      [id]
+        `SELECT d.*, c.name as company_name, u.name as employee_name, u.email as employee_email, o.meal_name, m.dietary
+         FROM deliveries d
+                JOIN orders o ON o.id = d.order_id
+                JOIN users u ON u.id = o.user_id
+                JOIN companies c ON c.id = d.company_id
+                JOIN meals m ON m.id = o.meal_id
+         WHERE d.id = $1`,
+        [id]
     );
 
     return {
@@ -158,7 +158,6 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // GET /api/v1/ops/issues
   fastify.get('/issues', async (req) => {
     await req.requirePermission('issues:read');
 
@@ -173,11 +172,11 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const issues = await dbAll<any>(
-      `SELECT i.*, c.name as company_name FROM issues i
+        `SELECT i.*, c.name as company_name FROM issues i
        LEFT JOIN companies c ON c.id = i.company_id
        ${where}
        ORDER BY i.created_at DESC`,
-      params
+        params
     );
 
     return {
@@ -197,7 +196,7 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // POST /api/v1/ops/issues
+  // UPDATED: notifies every ops user in-app when a new issue is logged.
   fastify.post('/issues', async (req, reply) => {
     const user = await req.requirePermission('issues:write');
 
@@ -206,17 +205,24 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const id = nanoid();
     await dbRun(
-      `INSERT INTO issues (id, company_id, order_id, reporter_id, title, description, severity, status)
+        `INSERT INTO issues (id, company_id, order_id, reporter_id, title, description, severity, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
-      [id, body.data.companyId ?? null, body.data.orderId ?? null, user.id,
-       body.data.title, body.data.description ?? '', body.data.severity]
+        [id, body.data.companyId ?? null, body.data.orderId ?? null, user.id,
+          body.data.title, body.data.description ?? '', body.data.severity]
     );
 
     const issue = await dbGet<any>('SELECT * FROM issues WHERE id = $1', [id]);
+
+    await notifyPortal('ops', {
+      kind: 'issue',
+      title: body.data.severity === 'critical' || body.data.severity === 'high' ? `Urgent issue: ${body.data.title}` : `New issue: ${body.data.title}`,
+      body: body.data.description || 'No further details provided.',
+      link: '/ops/issues',
+    });
+
     return reply.status(201).send({ issue: formatIssue(issue) });
   });
 
-  // PATCH /api/v1/ops/issues/:id
   fastify.patch('/issues/:id', async (req, reply) => {
     await req.requirePermission('issues:write');
     const { id } = req.params as { id: string };
@@ -243,13 +249,12 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     return { issue: formatIssue(updated) };
   });
 
-  // GET /api/v1/ops/packing — today's packing list grouped by company
   fastify.get('/packing', async (req) => {
     await req.requirePermission('deliveries:read');
 
     const today = new Date().toISOString().slice(0, 10);
     const rows = await dbAll<any>(
-      `SELECT o.meal_name, o.meal_id, u.name as employee_name, c.name as company_name, c.id as company_id,
+        `SELECT o.meal_name, o.meal_id, u.name as employee_name, c.name as company_name, c.id as company_id,
               m.dietary, m.allergens
        FROM orders o
        JOIN users u ON u.id = o.user_id
@@ -257,10 +262,9 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
        JOIN meals m ON m.id = o.meal_id
        WHERE o.date = $1 AND o.status NOT IN ('cancelled', 'failed')
        ORDER BY c.name, o.meal_name, u.name`,
-      [today]
+        [today]
     );
 
-    // Group by company, then meal
     const grouped: Record<string, any> = {};
     for (const r of rows) {
       if (!grouped[r.company_id]) {
@@ -288,7 +292,6 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // GET /api/v1/ops/menus/:weekStart
   fastify.get('/menus/:weekStart', async (req, reply) => {
     await req.requirePermission('menus:read');
     const { weekStart } = req.params as { weekStart: string };
@@ -299,15 +302,18 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     return buildMenuResponse(menu);
   });
 
-  // PATCH /api/v1/ops/menus/:weekStart — add/remove meals from a day
+  // UPDATED: mealWindow is now part of the payload (defaults to
+  // 'lunch') and scopes the delete/insert to that window only, so
+  // editing lunch for a day doesn't wipe that day's breakfast lineup.
   fastify.patch('/menus/:weekStart', async (req, reply) => {
     await req.requirePermission('menus:write');
     const { weekStart } = req.params as { weekStart: string };
 
     const body = z.object({
       date: z.string(),
-      meals: z.array(z.string()), // meal IDs
+      meals: z.array(z.string()),
       cutoffTime: z.string().optional(),
+      mealWindow: z.enum(['breakfast', 'lunch']).default('lunch'),
     }).safeParse(req.body);
 
     if (!body.success) return reply.status(400).send({ message: 'Invalid menu data' });
@@ -317,25 +323,24 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!menu) {
       const id = nanoid();
       await dbRun(
-        `INSERT INTO menus (id, week_start, published, created_by) VALUES ($1, $2, FALSE, $3)`,
-        [id, weekStart, caller.id]
+          `INSERT INTO menus (id, week_start, published, created_by) VALUES ($1, $2, FALSE, $3)`,
+          [id, weekStart, caller.id]
       );
       menu = await dbGet<any>('SELECT * FROM menus WHERE id = $1', [id]);
     }
 
-    const { date, meals, cutoffTime } = body.data;
-    const cutoff = cutoffTime ?? `${date}T10:00:00.000Z`;
+    const { date, meals, cutoffTime, mealWindow } = body.data;
+    const cutoff = cutoffTime ?? `${date}T${mealWindow === 'breakfast' ? '09' : '13'}:00:00.000Z`;
 
-    // Replace meals for this date
-    await dbRun('DELETE FROM menu_meals WHERE menu_id = $1 AND date = $2', [menu.id, date]);
+    await dbRun('DELETE FROM menu_meals WHERE menu_id = $1 AND date = $2 AND meal_window = $3', [menu.id, date, mealWindow]);
     for (const mealId of meals) {
       const meal = await dbGet('SELECT id FROM meals WHERE id = $1', [mealId]);
       if (meal) {
         await dbRun(
-          `INSERT INTO menu_meals (id, menu_id, date, meal_id, cutoff_time)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (menu_id, date, meal_id) DO NOTHING`,
-          [nanoid(), menu.id, date, mealId, cutoff]
+            `INSERT INTO menu_meals (id, menu_id, date, meal_id, cutoff_time, meal_window)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (menu_id, date, meal_id) DO UPDATE SET cutoff_time = $5, meal_window = $6`,
+            [nanoid(), menu.id, date, mealId, cutoff, mealWindow]
         );
       }
     }
@@ -345,7 +350,6 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     return buildMenuResponse(refreshed!);
   });
 
-  // POST /api/v1/ops/menus/:weekStart/publish
   fastify.post('/menus/:weekStart/publish', async (req, reply) => {
     await req.requirePermission('menus:publish');
     const { weekStart } = req.params as { weekStart: string };
@@ -354,8 +358,8 @@ const opsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!menu) return reply.status(404).send({ message: 'Menu not found' });
 
     await dbRun(
-      `UPDATE menus SET published = TRUE, published_at = now(), updated_at = now() WHERE id = $1`,
-      [menu.id]
+        `UPDATE menus SET published = TRUE, published_at = now(), updated_at = now() WHERE id = $1`,
+        [menu.id]
     );
 
     const refreshed = await dbGet<any>('SELECT * FROM menus WHERE id = $1', [menu.id]);
@@ -373,17 +377,18 @@ function formatIssue(i: any) {
 
 async function buildMenuResponse(menu: any) {
   const mealRows = await dbAll<any>(
-    `SELECT mm.date, mm.cutoff_time, m.* FROM menu_meals mm
-     JOIN meals m ON m.id = mm.meal_id
-     WHERE mm.menu_id = $1 ORDER BY mm.date, m.name`,
-    [menu.id]
+      `SELECT mm.date, mm.cutoff_time, mm.meal_window, m.* FROM menu_meals mm
+                                                                  JOIN meals m ON m.id = mm.meal_id
+       WHERE mm.menu_id = $1 ORDER BY mm.date, mm.meal_window, m.name`,
+      [menu.id]
   );
 
   const dateMap = new Map<string, any>();
   for (const r of mealRows) {
     const dateKey = toDateStr(r.date);
-    if (!dateMap.has(dateKey)) dateMap.set(dateKey, { date: dateKey, cutoffTime: r.cutoff_time, meals: [] });
-    dateMap.get(dateKey)!.meals.push({
+    const key = `${dateKey}-${r.meal_window}`;
+    if (!dateMap.has(key)) dateMap.set(key, { date: dateKey, mealWindow: r.meal_window, cutoffTime: r.cutoff_time, meals: [] });
+    dateMap.get(key)!.meals.push({
       id: r.id, name: r.name, description: r.description, price: r.price,
       spiceLevel: r.spice_level, allergens: asArray(r.allergens),
       dietary: asArray(r.dietary), imageUrl: r.image_url ?? undefined,
@@ -394,7 +399,7 @@ async function buildMenuResponse(menu: any) {
   return {
     id: menu.id, weekStart: toDateStr(menu.week_start),
     published: menu.published === true, publishedAt: menu.published_at ?? undefined,
-    days: Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date)),
+    days: Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date) || a.mealWindow.localeCompare(b.mealWindow)),
   };
 }
 

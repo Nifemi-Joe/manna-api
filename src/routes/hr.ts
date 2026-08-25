@@ -9,6 +9,12 @@
  * PATCH /api/v1/hr/rules
  * GET  /api/v1/hr/billing
  * GET  /api/v1/hr/reports
+ *
+ * UPDATED: GET /hr/orders now joins the payer (ordered_by_user_id) as
+ * well as the recipient, and returns isDelegated + overspendCovered —
+ * this is what makes "Sarah ordered for Bola" and overspend usage
+ * visible on the HR Orders page instead of being invisible inside
+ * allowance_covered. Every other route in this file is unchanged.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -39,7 +45,6 @@ const rulesSchema = z.object({
   eligibleDays: z.array(z.string()).optional(),
 });
 
-/** Returns [firstDayOfMonth, firstDayOfNextMonth) as YYYY-MM-DD strings, for a "YYYY-MM" key. */
 function monthRange(yearMonth: string): [string, string] {
   const [y, m] = yearMonth.split('-').map(Number);
   const start = `${yearMonth}-01`;
@@ -57,7 +62,7 @@ function asArray(value: unknown): any[] {
 
 const hrRoutes: FastifyPluginAsync = async (fastify) => {
 
-  // GET /api/v1/hr/orders
+  // GET /api/v1/hr/orders — UPDATED: payer join + isDelegated + overspendCovered
   fastify.get('/orders', async (req) => {
     const user = await req.requirePermission('orders:read');
     if (!user.companyId) return { orders: [], total: 0, page: 1, perPage: 50, totalAmount: 0 };
@@ -77,35 +82,42 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     const where = conditions.join(' AND ');
 
     const total = (await dbGet<{ cnt: string }>(
-      `SELECT COUNT(*) as cnt FROM orders o WHERE ${where}`, params
+        `SELECT COUNT(*) as cnt FROM orders o WHERE ${where}`, params
     ));
     const totalCount = total?.cnt ? parseInt(total.cnt, 10) : 0;
 
     const totalAmountRow = await dbGet<{ sum: string }>(
-      `SELECT COALESCE(SUM(total_amount), 0) as sum FROM orders o WHERE ${where}`, params
+        `SELECT COALESCE(SUM(total_amount), 0) as sum FROM orders o WHERE ${where}`, params
     );
     const totalAmount = totalAmountRow?.sum ? parseInt(totalAmountRow.sum, 10) : 0;
 
     const limitParamIdx = params.length + 1;
     const offsetParamIdx = params.length + 2;
     const orders = await dbAll<any>(
-      `SELECT o.*, u.name as employee_name, u.email as employee_email
-       FROM orders o JOIN users u ON u.id = o.user_id
-       WHERE ${where}
-       ORDER BY o.created_at DESC LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}`,
-      [...params, perPage, offset]
+        `SELECT o.*, recipient.name as employee_name, recipient.email as employee_email,
+                payer.name as payer_name, payer.email as payer_email
+         FROM orders o
+                JOIN users recipient ON recipient.id = o.user_id
+                LEFT JOIN users payer ON payer.id = o.ordered_by_user_id
+         WHERE ${where}
+         ORDER BY o.created_at DESC LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}`,
+        [...params, perPage, offset]
     );
 
     return {
       orders: orders.map(o => ({
         id: o.id,
         userId: o.user_id,
+        orderedByUserId: o.ordered_by_user_id ?? o.user_id,
         mealId: o.meal_id,
         mealName: o.meal_name,
         date: toDateStr(o.date),
         status: o.status,
         totalAmount: o.total_amount,
         allowanceCovered: o.allowance_covered,
+        // NEW: how much of allowanceCovered specifically came from an
+        // authorized overspend allowance, not the base allowance.
+        overspendCovered: o.overspend_covered ?? 0,
         employeePaid: o.employee_paid,
         companyId: o.company_id,
         deliveryAddress: o.delivery_address ?? undefined,
@@ -113,6 +125,10 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
         cancellable: o.cancellable === true,
         employeeName: o.employee_name,
         employeeEmail: o.employee_email,
+        // NEW: who actually placed/paid for it, if different from the recipient.
+        payerName: o.payer_name ?? o.employee_name,
+        payerEmail: o.payer_email ?? o.employee_email,
+        isDelegated: o.ordered_by_user_id != null && o.ordered_by_user_id !== o.user_id,
         createdAt: o.created_at,
         updatedAt: o.updated_at,
       })),
@@ -124,19 +140,18 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // GET /api/v1/hr/employees
   fastify.get('/employees', async (req) => {
     const user = await req.requirePermission('employees:read');
     if (!user.companyId) return { employees: [], total: 0 };
 
     const employees = await dbAll<any>(
-      `SELECT u.id, u.email, u.name, u.status, u.created_at,
-              COUNT(o.id) as order_count
-       FROM users u
-       LEFT JOIN orders o ON o.user_id = u.id
-       WHERE u.company_id = $1 AND u.portal = 'employee'
-       GROUP BY u.id ORDER BY u.name`,
-      [user.companyId]
+        `SELECT u.id, u.email, u.name, u.status, u.created_at,
+                COUNT(o.id) as order_count
+         FROM users u
+                LEFT JOIN orders o ON o.user_id = u.id
+         WHERE u.company_id = $1 AND u.portal = 'employee'
+         GROUP BY u.id ORDER BY u.name`,
+        [user.companyId]
     );
 
     return {
@@ -152,7 +167,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  // POST /api/v1/hr/employees
   fastify.post('/employees', async (req, reply) => {
     const user = await req.requirePermission('employees:write');
     if (!user.companyId) return reply.status(403).send({ message: 'No company' });
@@ -167,18 +181,17 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
 
     const id = nanoid();
     await dbRun(
-      `INSERT INTO users (id, email, name, portal, company_id, status)
-       VALUES ($1, $2, $3, 'employee', $4, 'active')`,
-      [id, email, name, user.companyId]
+        `INSERT INTO users (id, email, name, portal, company_id, status)
+         VALUES ($1, $2, $3, 'employee', $4, 'active')`,
+        [id, email, name, user.companyId]
     );
 
-    // Assign employee role
     const empRole = await dbGet<{ id: string }>(`SELECT id FROM roles WHERE id = 'role-employee'`);
     if (empRole) {
       await dbRun(
-        `INSERT INTO role_assignments (id, user_id, role_id, assigned_by, status)
-         VALUES ($1, $2, 'role-employee', $3, 'active')`,
-        [nanoid(), id, user.id]
+          `INSERT INTO role_assignments (id, user_id, role_id, assigned_by, status)
+           VALUES ($1, $2, 'role-employee', $3, 'active')`,
+          [nanoid(), id, user.id]
       );
     }
 
@@ -187,7 +200,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
-  // PATCH /api/v1/hr/employees/:id
   fastify.patch('/employees/:id', async (req, reply) => {
     const user = await req.requirePermission('employees:write');
     const { id } = req.params as { id: string };
@@ -208,7 +220,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     return { employee: { id: updated.id, email: updated.email, name: updated.name, status: updated.status } };
   });
 
-  // DELETE /api/v1/hr/employees/:id
   fastify.delete('/employees/:id', async (req, reply) => {
     const user = await req.requirePermission('employees:delete');
     const { id } = req.params as { id: string };
@@ -220,7 +231,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     return { success: true };
   });
 
-  // GET /api/v1/hr/rules
   fastify.get('/rules', async (req, reply) => {
     const user = await req.requirePermission('rules:read');
     if (!user.companyId) {
@@ -239,7 +249,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     return formatRules(rules);
   });
 
-  // PATCH /api/v1/hr/rules
   fastify.patch('/rules', async (req, reply) => {
     const user = await req.requirePermission('rules:write');
     if (!user.companyId) return reply.status(403).send({ message: 'No company' });
@@ -252,13 +261,13 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (!existing) {
       await dbRun(
-        `INSERT INTO allowance_rules (id, company_id, daily_amount, monthly_cap_enabled, monthly_cap, meal_type, allow_top_ups, max_top_up, max_meals_per_day, allow_add_ons, eligible_days)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [nanoid(), user.companyId,
-         d.dailyAmount ?? 2500, d.monthlyCapEnabled ?? false, d.monthlyCap ?? null,
-         d.mealType ?? 'lunch', d.allowTopUps ?? true, d.maxTopUp ?? 5000,
-         d.maxMealsPerDay ?? 1, d.allowAddOns ?? false,
-         JSON.stringify(d.eligibleDays ?? ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'])]
+          `INSERT INTO allowance_rules (id, company_id, daily_amount, monthly_cap_enabled, monthly_cap, meal_type, allow_top_ups, max_top_up, max_meals_per_day, allow_add_ons, eligible_days)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [nanoid(), user.companyId,
+            d.dailyAmount ?? 2500, d.monthlyCapEnabled ?? false, d.monthlyCap ?? null,
+            d.mealType ?? 'lunch', d.allowTopUps ?? true, d.maxTopUp ?? 5000,
+            d.maxMealsPerDay ?? 1, d.allowAddOns ?? false,
+            JSON.stringify(d.eligibleDays ?? ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'])]
       );
     } else {
       const updates: string[] = [];
@@ -284,7 +293,6 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     return formatRules(updated);
   });
 
-  // GET /api/v1/hr/billing
   fastify.get('/billing', async (req) => {
     const user = await req.requirePermission('billing:read');
     if (!user.companyId) return { currentDue: 0, invoices: [] };
@@ -292,22 +300,21 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     const currentMonth = new Date().toISOString().slice(0, 7);
     const [curStart, curEnd] = monthRange(currentMonth);
     const currentDueRow = await dbGet<{ sum: string }>(
-      `SELECT COALESCE(SUM(allowance_covered), 0) as sum FROM orders
-       WHERE company_id = $1 AND date >= $2 AND date < $3 AND status NOT IN ('cancelled','failed')`,
-      [user.companyId, curStart, curEnd]
+        `SELECT COALESCE(SUM(allowance_covered), 0) as sum FROM orders
+         WHERE company_id = $1 AND date >= $2 AND date < $3 AND status NOT IN ('cancelled','failed')`,
+        [user.companyId, curStart, curEnd]
     );
     const currentDue = currentDueRow?.sum ? parseInt(currentDueRow.sum, 10) : 0;
 
-    // Generate invoice history (last 3 months)
     const invoices = [];
     for (let i = 1; i <= 3; i++) {
       const d = new Date(); d.setMonth(d.getMonth() - i);
       const ym = d.toISOString().slice(0, 7);
       const [start, end] = monthRange(ym);
       const totalRow = await dbGet<{ sum: string }>(
-        `SELECT COALESCE(SUM(allowance_covered), 0) as sum FROM orders
-         WHERE company_id = $1 AND date >= $2 AND date < $3 AND status NOT IN ('cancelled','failed')`,
-        [user.companyId, start, end]
+          `SELECT COALESCE(SUM(allowance_covered), 0) as sum FROM orders
+           WHERE company_id = $1 AND date >= $2 AND date < $3 AND status NOT IN ('cancelled','failed')`,
+          [user.companyId, start, end]
       );
       const total = totalRow?.sum ? parseInt(totalRow.sum, 10) : 0;
       if (total > 0) {
@@ -318,12 +325,10 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
     return { currentDue, currentMonth, invoices };
   });
 
-  // GET /api/v1/hr/reports
   fastify.get('/reports', async (req) => {
     const user = await req.requirePermission('reports:read');
     if (!user.companyId) return { participation: [], spend: [] };
 
-    // Last 8 weeks participation (approximate by calendar month-week bucket)
     const weeks: Array<{ week: string; orders: number; employees: number }> = [];
     for (let w = 7; w >= 0; w--) {
       const d = new Date(); d.setDate(d.getDate() - w * 7);
@@ -333,9 +338,9 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
       const wk = startStr.slice(0, 7);
 
       const row = await dbGet<{ orders: string; employees: string }>(
-        `SELECT COUNT(*) as orders, COUNT(DISTINCT user_id) as employees
-         FROM orders WHERE company_id = $1 AND date >= $2 AND date <= $3 AND status != 'cancelled'`,
-        [user.companyId, startStr, endStr]
+          `SELECT COUNT(*) as orders, COUNT(DISTINCT user_id) as employees
+           FROM orders WHERE company_id = $1 AND date >= $2 AND date <= $3 AND status != 'cancelled'`,
+          [user.companyId, startStr, endStr]
       );
       weeks.push({
         week: wk,
@@ -344,18 +349,16 @@ const hrRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    // Top meals
     const topMeals = await dbAll<{ meal_name: string; cnt: string }>(
-      `SELECT meal_name, COUNT(*) as cnt FROM orders
-       WHERE company_id = $1 AND status != 'cancelled'
-       GROUP BY meal_name ORDER BY cnt DESC LIMIT 5`,
-      [user.companyId]
+        `SELECT meal_name, COUNT(*) as cnt FROM orders
+         WHERE company_id = $1 AND status != 'cancelled'
+         GROUP BY meal_name ORDER BY cnt DESC LIMIT 5`,
+        [user.companyId]
     );
 
-    // Recent issues
     const issues = await dbAll<any>(
-      `SELECT * FROM issues WHERE company_id = $1 ORDER BY created_at DESC LIMIT 10`,
-      [user.companyId]
+        `SELECT * FROM issues WHERE company_id = $1 ORDER BY created_at DESC LIMIT 10`,
+        [user.companyId]
     );
 
     return {

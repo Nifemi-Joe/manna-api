@@ -1,7 +1,6 @@
 /**
  * src/services/auth.ts
- * Magic-link auth, session management, permission resolution.
- * Converted to Postgres (async, $N placeholders).
+ * Magic-link + OTP auth, session management, permission resolution.
  */
 
 import crypto from 'node:crypto';
@@ -11,6 +10,8 @@ import { dbGet, dbRun, dbAll } from '../db/index.js';
 const SESSION_COOKIE = 'manna_session';
 const SESSION_TTL_DAYS = 30;
 const MAGIC_EXPIRY_MINS = parseInt(process.env.MAGIC_LINK_EXPIRY_MINUTES ?? '15', 10);
+const OTP_EXPIRY_MINS = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10', 10);
+const OTP_MAX_ATTEMPTS = 5;
 
 // ── Token helpers ─────────────────────────────────────────
 
@@ -25,8 +26,8 @@ export async function createMagicToken(userId: string): Promise<string> {
   const hash = hashToken(token);
   const expiresAt = new Date(Date.now() + MAGIC_EXPIRY_MINS * 60_000).toISOString();
   await dbRun(
-    'INSERT INTO magic_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
-    [nanoid(), userId, hash, expiresAt]
+      'INSERT INTO magic_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
+      [nanoid(), userId, hash, expiresAt]
   );
   return token;
 }
@@ -34,7 +35,7 @@ export async function createMagicToken(userId: string): Promise<string> {
 export async function verifyMagicToken(token: string): Promise<{ userId: string } | null> {
   const hash = hashToken(token);
   const row = await dbGet<{ id: string; user_id: string; expires_at: string; used_at: string | null }>(
-    'SELECT * FROM magic_tokens WHERE token_hash = $1', [hash]
+      'SELECT * FROM magic_tokens WHERE token_hash = $1', [hash]
   );
   if (!row) return null;
   if (row.used_at) return null;
@@ -44,28 +45,85 @@ export async function verifyMagicToken(token: string): Promise<{ userId: string 
   return { userId: row.user_id };
 }
 
+// ── OTP (one-time code) ──────────────────────────────────
+// Alternative to the magic link: a 6-digit code sent by email or SMS,
+// entered directly on the login screen instead of clicking a link.
+// Requires the `otp_codes` table — see
+// db/migrations/002_pilot_and_meal_windows.ts.
+
+function generateOtpCode(): string {
+  // 6-digit numeric code, zero-padded (e.g. "042817")
+  return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+}
+
+export async function createOtpCode(userId: string): Promise<string> {
+  const code = generateOtpCode();
+  const codeHash = hashToken(code);
+  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINS * 60_000).toISOString();
+
+  // Invalidate any previous unused codes for this user so only the most
+  // recent one is valid — avoids a stale earlier code still working.
+  await dbRun('DELETE FROM otp_codes WHERE user_id = $1 AND used_at IS NULL', [userId]);
+
+  await dbRun(
+      'INSERT INTO otp_codes (id, user_id, code_hash, expires_at) VALUES ($1, $2, $3, $4)',
+      [nanoid(), userId, codeHash, expiresAt]
+  );
+
+  return code;
+}
+
+export type OtpVerifyResult =
+    | { ok: true; userId: string }
+    | { ok: false; reason: 'not_found' | 'expired' | 'used' | 'too_many_attempts' | 'incorrect_code' };
+
+/**
+ * Verifies a code against the most recent unused OTP for that user.
+ * Tracks attempts so a code can't be brute-forced (6 digits = 1M
+ * possibilities, but without a limit that's still guessable quickly).
+ */
+export async function verifyOtpCode(userId: string, code: string): Promise<OtpVerifyResult> {
+  const row = await dbGet<{ id: string; code_hash: string; expires_at: string; used_at: string | null; attempts: number }>(
+      'SELECT * FROM otp_codes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [userId]
+  );
+
+  if (!row) return { ok: false, reason: 'not_found' };
+  if (row.used_at) return { ok: false, reason: 'used' };
+  if (new Date(row.expires_at) < new Date()) return { ok: false, reason: 'expired' };
+  if (row.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, reason: 'too_many_attempts' };
+
+  const providedHash = hashToken(code);
+  if (providedHash !== row.code_hash) {
+    await dbRun('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+    return { ok: false, reason: 'incorrect_code' };
+  }
+
+  await dbRun('UPDATE otp_codes SET used_at = now() WHERE id = $1', [row.id]);
+  return { ok: true, userId };
+}
+
 // ── Sessions ──────────────────────────────────────────────
 
 export async function createSession(userId: string, portal: string): Promise<string> {
   const sessionId = nanoid(64);
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 86_400_000).toISOString();
   await dbRun(
-    'INSERT INTO sessions (id, user_id, portal, expires_at) VALUES ($1, $2, $3, $4)',
-    [sessionId, userId, portal, expiresAt]
+      'INSERT INTO sessions (id, user_id, portal, expires_at) VALUES ($1, $2, $3, $4)',
+      [sessionId, userId, portal, expiresAt]
   );
   return sessionId;
 }
 
 export async function getSession(sessionId: string): Promise<{ userId: string; portal: string } | null> {
   const row = await dbGet<{ user_id: string; portal: string; expires_at: string }>(
-    'SELECT user_id, portal, expires_at FROM sessions WHERE id = $1', [sessionId]
+      'SELECT user_id, portal, expires_at FROM sessions WHERE id = $1', [sessionId]
   );
   if (!row) return null;
   if (new Date(row.expires_at) < new Date()) {
     await dbRun('DELETE FROM sessions WHERE id = $1', [sessionId]);
     return null;
   }
-  // Touch last_seen
   await dbRun(`UPDATE sessions SET last_seen = now() WHERE id = $1`, [sessionId]);
   return { userId: row.user_id, portal: row.portal };
 }
@@ -84,6 +142,7 @@ export interface UserRow {
   portal: string;
   company_id: string | null;
   status: string;
+  phone: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,37 +159,35 @@ export async function getUserByEmail(email: string): Promise<UserRow | undefined
 
 export async function getUserPermissions(userId: string): Promise<string[]> {
   const rows = await dbAll<{ key: string }>(
-    `SELECT DISTINCT p.key FROM permissions p
+      `SELECT DISTINCT p.key FROM permissions p
      JOIN role_permissions rp ON rp.permission_id = p.id
      JOIN role_assignments ra ON ra.role_id = rp.role_id
      WHERE ra.user_id = $1 AND ra.status = 'active'`,
-    [userId]
+      [userId]
   );
   return rows.map(r => r.key);
 }
 
 export async function getUserRoles(userId: string): Promise<string[]> {
   const rows = await dbAll<{ name: string }>(
-    `SELECT r.name FROM roles r
+      `SELECT r.name FROM roles r
      JOIN role_assignments ra ON ra.role_id = r.id
      WHERE ra.user_id = $1 AND ra.status = 'active'`,
-    [userId]
+      [userId]
   );
   return rows.map(r => r.name);
 }
 
 export async function getCompanyByUserId(userId: string): Promise<{ id: string; name: string } | undefined> {
   return dbGet<{ id: string; name: string }>(
-    `SELECT c.id, c.name FROM companies c
+      `SELECT c.id, c.name FROM companies c
      JOIN users u ON u.company_id = c.id
      WHERE u.id = $1`,
-    [userId]
+      [userId]
   );
 }
 
 // ── Format user for API response ─────────────────────────
-// NOTE: now async because it fans out to three queries. Every call site
-// (plugins/auth.ts, routes/auth.ts, routes/access.ts) must `await` this.
 
 export async function formatUser(user: UserRow) {
   const [permissions, roles, company] = await Promise.all([
@@ -146,6 +203,7 @@ export async function formatUser(user: UserRow) {
     portal: user.portal,
     companyId: user.company_id ?? undefined,
     companyName: company?.name,
+    phone: user.phone ?? undefined,
     permissions,
     roles,
     createdAt: user.created_at,

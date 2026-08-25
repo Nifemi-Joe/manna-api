@@ -1,0 +1,41 @@
+# render.yaml — place this in the ROOT of your manna-api repo.
+# Render auto-detects this file and configures the service from it,
+# so you don't have to click through every setting in their dashboard.
+
+services:
+  - type: web
+    name: manna-api
+    runtime: node
+    region: frankfurt          # pick whatever's geographically closest to Lagos-served traffic
+    plan: starter               # free tier sleeps after inactivity — bad for a login flow people rely on; starter stays warm
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/v1/health   # you already have this route — Render pings it to know you're alive
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false            # set manually in Render's dashboard — never commit this
+      - key: SESSION_SECRET
+        generateValue: true    # let Render generate a real random 32+ char secret for you
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "Manna Office Meals <noreply@mannaworkmeals.com>"
+      - key: TERMII_API_KEY
+        sync: false
+      - key: APP_URL
+        sync: false            # your Netlify frontend URL — set once you have it
+      - key: ALLOW_DEBUG_LOGIN_LINK
+        value: "false"          # CRITICAL — see checklist below
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
+
+# A persistent disk — WITHOUT this, every meal photo Ops uploads through
+# the Meal Library gets wiped on every deploy or restart, because
+# Render's default filesystem is ephemeral. This is not optional if
+# you're using the local-disk upload feature we built.
+disk:
+  name: manna-uploads
+  mountPath: /var/data
+  sizeGB: 1

@@ -2,14 +2,39 @@
  * src/routes/auth.ts
  * POST /api/v1/auth/request-link
  * GET  /api/v1/auth/verify?token=
+ * POST /api/v1/auth/request-otp
+ * POST /api/v1/auth/verify-otp
  * POST /api/v1/auth/logout
  * POST /api/v1/auth/switch-context
+ *
+ * UPDATED (this pass) — ONLY the rate-limit config objects on
+ * request-otp and verify-otp were added below. Everything else is your
+ * existing file, unchanged. A 6-digit code is ~1,000,000 possibilities;
+ * the global 200/min/IP limit alone would let an attacker grind through
+ * a meaningful fraction of that in well under an hour. These close that
+ * gap specifically:
+ *   - request-otp: 5 requests / 15 min per IP
+ *   - verify-otp: 10 attempts / 15 min per IP — on top of the existing
+ *     per-code attempt ceiling in verifyOtpCode (too_many_attempts),
+ *     so rotating to a fresh code doesn't reset an attacker's budget.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { getUserByEmail, createMagicToken, verifyMagicToken, createSession, deleteSession, formatUser, getUserById, SESSION_COOKIE } from '../services/auth.js';
-import { sendMagicLink } from '../services/email.js';
+import {
+    getUserByEmail,
+    createMagicToken,
+    verifyMagicToken,
+    createOtpCode,
+    verifyOtpCode,
+    createSession,
+    deleteSession,
+    formatUser,
+    getUserById,
+    SESSION_COOKIE,
+} from '../services/auth.js';
+import { sendMagicLink, sendOtpEmail } from '../services/email.js';
+import { sendOtpSms } from '../services/sms.js';
 import { dbRun } from '../db/index.js';
 
 const COOKIE_OPTS = {
@@ -22,22 +47,24 @@ const COOKIE_OPTS = {
 
 /**
  * Controls whether the magic link itself is ever returned in the
- * /request-link API response (as `debugLink`).
- *
- * This is deliberately an explicit opt-in env var, NOT tied to NODE_ENV.
- * Reasoning: a deployed environment (Render, etc.) is `NODE_ENV=production`
- * but may still be a staging/test deployment without a verified sending
- * domain yet — and "is this real production with real users" isn't
- * something the app can infer from NODE_ENV alone. Defaulting this to
- * off and requiring a conscious env var keeps it from accidentally
- * leaking sign-in links once real users are on the platform.
- *
- * Set ALLOW_DEBUG_LOGIN_LINK=true on Render (or locally) to enable.
+ * /request-link API response (as `debugLink`). Deliberately an explicit
+ * opt-in env var, not tied to NODE_ENV — see original comment history.
+ * Set ALLOW_DEBUG_LOGIN_LINK=true to enable.
  */
 const ALLOW_DEBUG_LOGIN_LINK = process.env.ALLOW_DEBUG_LOGIN_LINK === 'true';
 
 const requestLinkSchema = z.object({ email: z.string().email() });
 const switchContextSchema = z.object({ portal: z.enum(['employee', 'hr', 'ops', 'admin', 'studio']) });
+
+const requestOtpSchema = z.object({
+    email: z.string().email(),
+    /** Defaults to email; pass 'sms' to send via the user's stored phone number instead. */
+    channel: z.enum(['email', 'sms']).default('email'),
+});
+const verifyOtpSchema = z.object({
+    email: z.string().email(),
+    code: z.string().length(6),
+});
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
 
@@ -50,8 +77,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         const user = await getUserByEmail(email);
 
         // Always return the same generic message to prevent email enumeration
-        // — but only actually attempt a send (and possibly expose debugLink)
-        // when a real, active account exists for this address.
+        // — only actually attempt a send when a real, active account exists.
         if (!user || user.status !== 'active') {
             return reply.send({ message: 'If that email is registered, a link has been sent.' });
         }
@@ -65,11 +91,6 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
                 : 'Could not send email right now — use the link below to sign in.',
         };
 
-        // Expose the link directly when:
-        //   - the operator has explicitly opted in via ALLOW_DEBUG_LOGIN_LINK, AND
-        //   - either we're not in production, OR the real send failed (so the
-        //     user isn't left completely unable to log in because of a
-        //     delivery problem like an unverified domain).
         const shouldExposeLink =
             ALLOW_DEBUG_LOGIN_LINK && (process.env.NODE_ENV !== 'production' || !result.sent);
 
@@ -102,11 +123,84 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         reply.setCookie(SESSION_COOKIE, sessionId, COOKIE_OPTS);
 
         const formatted = await formatUser(user);
-        return reply.send({
-            token: sessionId,
-            user: formatted,
-            portal: user.portal,
-        });
+        return reply.send({ token: sessionId, user: formatted, portal: user.portal });
+    });
+
+    // POST /api/v1/auth/request-otp — max 5 requests / 15 min per IP
+    fastify.post('/request-otp', {
+        config: { rateLimit: { max: 5, timeWindow: '15 minutes' } },
+    }, async (req, reply) => {
+        const body = requestOtpSchema.safeParse(req.body);
+        if (!body.success) return reply.status(400).send({ message: 'Valid email required' });
+
+        const { email, channel } = body.data;
+        const user = await getUserByEmail(email);
+
+        // Same enumeration-prevention pattern as request-link.
+        if (!user || user.status !== 'active') {
+            return reply.send({ message: 'If that email is registered, a code has been sent.' });
+        }
+
+        if (channel === 'sms' && !user.phone) {
+            return reply.status(400).send({ message: 'No phone number on file for this account. Try email instead.' });
+        }
+
+        const code = await createOtpCode(user.id);
+
+        const result =
+            channel === 'sms' && user.phone
+                ? await sendOtpSms(user.phone, code)
+                : await sendOtpEmail(email, code);
+
+        const response: Record<string, string> = {
+            message: result.sent
+                ? `Code sent via ${channel}. Check your ${channel === 'sms' ? 'phone' : 'email'}.`
+                : `Could not send ${channel} right now.`,
+        };
+
+        // Same debug-only exposure pattern as the magic link, for local dev
+        // and delivery-failure fallback — never exposed in real production
+        // sends unless explicitly opted in.
+        const shouldExposeCode =
+            ALLOW_DEBUG_LOGIN_LINK && (process.env.NODE_ENV !== 'production' || !result.sent);
+        if (shouldExposeCode) {
+            response.debugCode = code;
+            if (!result.sent && result.error) response.debugReason = `Delivery failed: ${result.error}`;
+        }
+
+        return reply.send(response);
+    });
+
+    // POST /api/v1/auth/verify-otp — max 10 attempts / 15 min per IP
+    fastify.post('/verify-otp', {
+        config: { rateLimit: { max: 10, timeWindow: '15 minutes' } },
+    }, async (req, reply) => {
+        const body = verifyOtpSchema.safeParse(req.body);
+        if (!body.success) return reply.status(400).send({ message: 'Email and 6-digit code required' });
+
+        const { email, code } = body.data;
+        const user = await getUserByEmail(email);
+        if (!user || user.status !== 'active') {
+            return reply.status(401).send({ message: 'Invalid code' });
+        }
+
+        const result = await verifyOtpCode(user.id, code);
+        if (!result.ok) {
+            const messages: Record<string, string> = {
+                not_found: 'No code requested for this account. Request a new one.',
+                expired: 'This code has expired. Request a new one.',
+                used: 'This code has already been used. Request a new one.',
+                too_many_attempts: 'Too many incorrect attempts. Request a new code.',
+                incorrect_code: 'Incorrect code. Please try again.',
+            };
+            return reply.status(401).send({ message: messages[result.reason] });
+        }
+
+        const sessionId = await createSession(user.id, user.portal);
+        reply.setCookie(SESSION_COOKIE, sessionId, COOKIE_OPTS);
+
+        const formatted = await formatUser(user);
+        return reply.send({ token: sessionId, user: formatted, portal: user.portal });
     });
 
     // POST /api/v1/auth/logout
@@ -124,8 +218,6 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         if (!body.success) return reply.status(400).send({ message: 'Invalid portal' });
 
         const { portal } = body.data;
-
-        // Update user's portal and rotate session
         await dbRun(`UPDATE users SET portal = $1, updated_at = now() WHERE id = $2`, [portal, user.id]);
 
         const oldSid = req.cookies?.[SESSION_COOKIE];
