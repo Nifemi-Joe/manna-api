@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp src/db/*.sql dist/db/",
     "start": "node dist/index.js",
     "seed": "tsx scripts/seed-full-menu.ts",
     "send-daily-menu": "tsx scripts/verify-email-delivery.ts"
